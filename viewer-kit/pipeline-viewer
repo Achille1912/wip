@@ -450,7 +450,7 @@ button,input,select{border-radius:6px}
 <div id="emp" class="nota">Select a block to see what it does, leave a note on it or ask about it. Ctrl K writes a note from the keyboard.</div>
 <div id="dock" class="isl"><div id="dt" role="tablist"><button data-p="run" id="tr" hidden>Run<i class="dot"></i></button><button data-p="notes">Notes <b id="nc">0</b></button><button data-p="rules" id="tl" hidden>Rules</button><button id="dk" aria-label="Collapse or expand the panel">▴</button></div>
 <div id="dbody" hidden><div class="dp" data-p="run"><div id="pp" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Plan</h2><div id="pt" class="nota"></div><div id="pg"></div><div class="az" id="pa" hidden><button class="p" id="pok">Approve and run</button><button id="pdc">Discard plan</button></div></div>
-<div id="rn" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Run</h2><div id="rt" class="nota"></div><div id="rg"></div><div class="az" id="ra" hidden><button class="p" id="ap">Apply selected</button><button id="dc">Discard run</button></div></div>
+<div id="rn" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Run</h2><div id="rt" class="nota"></div><div id="rg"></div><div id="ckr" class="nota" hidden></div><div class="az" id="ra" hidden><button class="p" id="ap">Apply selected</button><button id="ck" hidden title="Apply only the ticked files to a clean copy and run their tests">Test this selection</button><button id="dc">Discard run</button></div></div>
 </div><div class="dp" data-p="notes"><div id="nl"></div></div><div class="dp" data-p="rules"><div id="rls" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Rules</h2><div class="az"><input id="ri" placeholder="Add an architecture rule in plain words, e.g. no Python file longer than 800 lines"><button class="p" id="ra2">Add rule</button><button id="rc">Check</button></div><div id="rm" class="nota"></div><div id="rr"></div></div>
 </div></div></div></aside>
 <script src="/vendor/cytoscape.min.js"></script><script src="/vendor/elk.bundled.js"></script><script src="/vendor/cytoscape-node-html-label.min.js"></script>
@@ -680,10 +680,14 @@ function runUi(r){if(!r)return;const x=r.result;$("ru").hidden=!r.enabled;$("ru"
   for(const l of x.arch.length?x.arch:["No architectural change: same components, flows and data contracts."])a.append(el("div",{"+":"fatta","-":"rosso","!":"rosso"}[l[0]]||"nota",l));$("rg").append(a)}
  if(x&&x.permissions&&x.permissions.length){const a=el("div","row");a.append(el("b",null,"Permissions during the run"));  // every request the agent made, and the answer
   for(const q of x.permissions)a.append(el("div",/denied|timed/.test(q.decision)?"rosso":"nota",q.tool+" · "+q.text.slice(0,160)+" → "+q.decision));$("rg").append(a)}
- for(const g of x?x.groups:[]){const d=el("details","row"),s=el("summary"),c=el("input"),t=tlabel(g.tests);c.type="checkbox";c.checked=true;c.dataset.g=g.id;
+ RX=x;for(const g of x?x.groups:[]){const d=el("details","row"),s=el("summary"),c=el("input"),t=tlabel(g.tests);c.type="checkbox";c.checked=!x.selection||x.selection.groups.includes(g.id);c.dataset.g=g.id;
   s.append(c,document.createTextNode(" "+g.title+" · "+g.files.join(", ")+" "),el("span","t "+t[1],t[0]));
   const pre=el("pre",null,g.diff);pre.style.cssText="white-space:pre-wrap;font-size:.75rem;max-height:20rem;overflow:auto";
-  d.append(s,el("div","nota","After: "+g.tests.detail+(g.tests.before?" · Before: "+g.tests.before.detail:"")),pre);$("rg").append(d)}}
+  d.append(s,el("div","nota","After: "+g.tests.detail+(g.tests.before?" · Before: "+g.tests.before.detail:"")),pre);$("rg").append(d)}selUi()}
+let RX=null;const runIds=()=>[...$("rg").querySelectorAll("input[data-g]:checked")].map(c=>c.dataset.g).sort();
+function selUi(){const x=RX,ids=runIds(),s=x&&x.selection,same=!!s&&JSON.stringify(s.groups)==JSON.stringify(ids);  // a partial selection is tested on its own before you apply it
+ $("ck").hidden=!x||!ids.length||ids.length==x.groups.length||same;$("ckr").hidden=!same||ids.length==x.groups.length;
+ if(same){const t=tlabel(s);$("ckr").className="nota "+t[1];$("ckr").textContent="Only the ticked files, tested on their own: "+t[0]+" · "+s.detail}}
 async function runPost(o){askNotify();const j=await post(o,"/api/run");$("rs").textContent=j.errore||"";RUNJ="";await carica();rules()}
 async function carica(){
  const n=await(await fetch("/api/pipeline")).json();stato(n.refresh);runUi(n.run);planUi(n.plan,n.run);permUi(n.perm);dockSync(n);CAPS=n.caps||{};
@@ -756,7 +760,8 @@ addEventListener("keydown",e=>{const k=e.key.toLowerCase();
  const b=k=="p"?$("pn"):k=="r"?$("ru"):null;if(b&&!b.hidden&&!b.disabled){e.preventDefault();e.stopPropagation();b.click()}},true);  // capture: before the tool shortcuts (R = rectangle)
 $("pn").onclick=()=>planPost({azione:"start",model:$("qm").value});$("pok").onclick=()=>planPost({azione:"approve"});$("pdc").onclick=()=>planPost({azione:"discard"});
 $("ru").onclick=()=>runPost({azione:"start"});$("dc").onclick=()=>runPost({azione:"discard"});
-$("ap").onclick=()=>runPost({azione:"apply",groups:[...$("rg").querySelectorAll("input:checked")].map(c=>c.dataset.g)});
+$("ap").onclick=()=>runPost({azione:"apply",groups:runIds()});$("rg").addEventListener("change",selUi);
+$("ck").onclick=async()=>{$("ck").disabled=true;$("ck").textContent="Testing the selection…";try{await runPost({azione:"check",groups:runIds()})}finally{$("ck").disabled=false;$("ck").textContent="Test this selection"}};
 $("cp").onclick=()=>copia("note");$("cm").onclick=()=>copia("modello");
 $("ok").onclick=salva;$("nn").onkeydown=e=>{if(e.key=="Enter")salva()};
 let boot=null;setInterval(async()=>{try{const b=(await(await fetch("/api/versione")).json()).boot;if(boot&&b!=boot)location.reload();boot=b}catch(e){}},2000);
@@ -1112,6 +1117,14 @@ def main():
             if self.path == "/api/run":
                 if not A.run_cmd: return self.j(400, {"errore": "run not configured"})
                 az, res = d.get("azione"), leggi_run()
+                if az == "check":  # tests of a partial selection: minutes, so outside the lock (notes stay usable meanwhile)
+                    if RN["running"] or not res: return self.j(400, {"errore": "no run to check"})
+                    g = d.get("groups") if isinstance(d.get("groups"), list) else []
+                    keep = [x for x in g if x in {y["id"] for y in res["groups"]}]  # only ids the run itself produced reach the shell
+                    if not keep: return self.j(400, {"errore": "select at least one file"})
+                    r = subprocess.run(f'{A.run_cmd} check "{",".join(keep)}"', shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1500)
+                    if r.returncode: return self.j(500, {"errore": (r.stderr or r.stdout).strip()[-300:]})
+                    return self.j(200, {"ok": True})
                 with LOCK:
                     if RN["running"]: return self.j(400, {"errore": "a run is in progress"})
                     if az == "start":

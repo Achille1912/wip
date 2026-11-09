@@ -1,5 +1,5 @@
 """Run engine: notes -> agent in an isolated git worktree -> diff per file group + targeted tests.
-Usage: run.py <repo> <blueprint.js> <state dir> run <prompt file> | apply <group,group> | discard
+Usage: run.py <repo> <blueprint.js> <state dir> run <prompt file> | check <group,group> | apply <group,group> | discard
 Nothing touches the repo's working tree until `apply`; .env files are never copied into the worktree."""
 import asyncio
 import json
@@ -122,21 +122,22 @@ def run_tests(tests, root):
     last = (r.stdout.strip().splitlines() or [r.stderr.strip()[-200:] or f"exit code {r.returncode}"])[-1]
     if custom:
         return {"status": "green" if r.returncode == 0 else "red", "detail": f"{custom}: {last}", "files": tests}
-    # red only if pytest itself reports failed tests: "python -m pytest" without pytest installed also exits 1, and collection/import errors are not failures
-    status = "green" if r.returncode == 0 else "red" if r.returncode == 1 and re.search(r"\d+ failed", r.stdout) else "unrunnable"
+    # red only if pytest itself reports failed or errored tests ("python -m pytest" without pytest also exits 1). An import error counts:
+    # one caused by the environment shows up before the run too, and the viewer then reads it as "already failing before"
+    status = "green" if r.returncode == 0 else "red" if r.returncode in (1, 2) and re.search(r"\d+ (failed|errors?)\b", r.stdout) else "unrunnable"
     return {"status": status, "detail": last, "files": tests}
 
 
-def before_after(tests, base):
-    """The same tests on the untouched code and on the run's result: a red test that was already red is not the run's fault."""
-    after = run_tests(tests, wt)
+def before_after(tests, base, root=None):
+    """The same tests on the untouched code and on the run's result (or root): a red test that was already red is not the run's fault."""
+    after = run_tests(tests, root or wt)
     old = [t for t in tests if (base / t).exists()]  # a test file the run created has no "before"
     after["before"] = run_tests(old, base) if old or config().get("test") else {"status": "none", "detail": "new tests", "files": []}
     return after
 
 
 def discard(keep_plan=False):
-    for w in (wt, run_dir / "base"):  # base: left behind only if a run was killed while testing
+    for w in (wt, run_dir / "base", run_dir / "sel"):  # base, sel: left behind only if a run or a check was killed while testing
         git("worktree", "remove", "--force", str(w), check=False)
     git("worktree", "prune", check=False)
     for b in git("branch", "--list", "blueprint/run-*", check=False).split():
@@ -189,6 +190,26 @@ def run(prompt_file):
     print(f"{len(groups)} file group(s) changed")
 
 
+def check(ids):
+    """Only the selected file groups on the base commit, with their tests before and after: leaving a file out can break the others."""
+    res = json.loads(out.read_text(encoding="utf-8"))
+    sel = [g for g in res["groups"] if g["id"] in ids]
+    sw, bw = run_dir / "sel", run_dir / "base"
+    for w in (sw, bw):
+        git("worktree", "remove", "--force", str(w), check=False)
+        git("worktree", "add", "--detach", str(w), res["base"])
+    try:
+        for g in sel:
+            git("apply", "--binary", str(run_dir / f'{g["id"]}.patch'), cwd=sw)
+        tests = sorted({t for g in sel for t in g["tests"]["files"] if (sw / t).exists()})  # a new test file left out is not part of this selection
+        res["selection"] = {"groups": sorted(g["id"] for g in sel), **before_after(tests, bw, sw)}
+    finally:
+        for w in (sw, bw):
+            git("worktree", "remove", "--force", str(w), check=False)
+    out.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+    print(f'selection of {len(sel)} group(s): {res["selection"]["status"]}')
+
+
 def apply(ids):
     res = json.loads(out.read_text(encoding="utf-8"))
     patches = [run_dir / f'{g["id"]}.patch' for g in res["groups"] if g["id"] in ids]
@@ -202,6 +223,6 @@ def apply(ids):
 
 
 try:
-    {"run": lambda: run(sys.argv[5]), "apply": lambda: apply(set(sys.argv[5].split(",")) if len(sys.argv) > 5 else set()), "discard": discard}[cmd]()
+    {"run": lambda: run(sys.argv[5]), "check": lambda: check(set(sys.argv[5].split(","))), "apply": lambda: apply(set(sys.argv[5].split(",")) if len(sys.argv) > 5 else set()), "discard": discard}[cmd]()
 except Exception as e:
     sys.exit(str(e))
