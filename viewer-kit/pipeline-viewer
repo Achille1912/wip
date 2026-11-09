@@ -656,6 +656,8 @@ function planUi(p,r){if(!p)return;const x=p.result,run=r&&(r.running||r.result),
  if(open)for(const l of x.lines)$("pg").append(el("div",{"+":"fatta","-":"rosso"}[l[0]]||"nota",l))}
 async function planPost(o){askNotify();const j=await post(o,"/api/plan");$("rs").textContent=j.errore||"";PLNJ="";RUNJ="";await carica()}
 const TS={green:["tests passed","fatta"],red:["tests failed","rosso"],unrunnable:["tests could not run","grigio"],none:["no tests","grigio"]};
+function tlabel(t){const b=t.before&&t.before.status;  // after the run, read against before it: only a newly red test is the run's fault
+ return t.status=="red"&&b=="red"?["already failing before","grigio"]:t.status=="red"&&b=="green"?["broken by this run","rosso"]:t.status=="green"&&b=="red"?["fixed by this run","fatta"]:TS[t.status]}
 let RUNJ="",CAPS={},RV=new Set(),STILI={},ANN=[];
 async function rules(){if(!CAPS.rules)return;const j=await(await fetch("/api/rules")).json();$("rls").hidden=false;$("rr").replaceChildren();RV=new Set();
  if(j.errore){$("rr").textContent="Rules check failed: "+j.errore;return}
@@ -678,10 +680,10 @@ function runUi(r){if(!r)return;const x=r.result;$("ru").hidden=!r.enabled;$("ru"
   for(const l of x.arch.length?x.arch:["No architectural change: same components, flows and data contracts."])a.append(el("div",{"+":"fatta","-":"rosso","!":"rosso"}[l[0]]||"nota",l));$("rg").append(a)}
  if(x&&x.permissions&&x.permissions.length){const a=el("div","row");a.append(el("b",null,"Permissions during the run"));  // every request the agent made, and the answer
   for(const q of x.permissions)a.append(el("div",/denied|timed/.test(q.decision)?"rosso":"nota",q.tool+" · "+q.text.slice(0,160)+" → "+q.decision));$("rg").append(a)}
- for(const g of x?x.groups:[]){const d=el("details","row"),s=el("summary"),c=el("input"),t=TS[g.tests.status];c.type="checkbox";c.checked=true;c.dataset.g=g.id;
+ for(const g of x?x.groups:[]){const d=el("details","row"),s=el("summary"),c=el("input"),t=tlabel(g.tests);c.type="checkbox";c.checked=true;c.dataset.g=g.id;
   s.append(c,document.createTextNode(" "+g.title+" · "+g.files.join(", ")+" "),el("span","t "+t[1],t[0]));
   const pre=el("pre",null,g.diff);pre.style.cssText="white-space:pre-wrap;font-size:.75rem;max-height:20rem;overflow:auto";
-  d.append(s,el("div","nota",g.tests.detail),pre);$("rg").append(d)}}
+  d.append(s,el("div","nota","After: "+g.tests.detail+(g.tests.before?" · Before: "+g.tests.before.detail:"")),pre);$("rg").append(d)}}
 async function runPost(o){askNotify();const j=await post(o,"/api/run");$("rs").textContent=j.errore||"";RUNJ="";await carica();rules()}
 async function carica(){
  const n=await(await fetch("/api/pipeline")).json();stato(n.refresh);runUi(n.run);planUi(n.plan,n.run);permUi(n.perm);dockSync(n);CAPS=n.caps||{};

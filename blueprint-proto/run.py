@@ -78,22 +78,66 @@ def tests_for(files):
     return sorted(tests)[:15]
 
 
-def run_tests(tests):
-    if not tests:
+def test_python():
+    """(python, None) for the project's own environment, found from the real repo (a worktree path would make pipenv create a new one),
+    or (None, why) when the project declares one that does not exist yet: the tool never installs anything."""
+    venv = None
+    for marker, probe, hint in (("Pipfile", ["pipenv", "--venv"], "pipenv install --dev"), ("poetry.lock", ["poetry", "env", "info", "-p"], "poetry install")):
+        if (repo / marker).exists():
+            try:
+                r = subprocess.run(probe, cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+                venv = r.stdout.strip().splitlines()[-1] if r.returncode == 0 and r.stdout.strip() else None
+            except (OSError, subprocess.TimeoutExpired):
+                venv = None
+            if not venv:
+                return None, f"the project has no environment yet: run `{hint}` in {repo}"
+            break
+    venv = venv or next((str(repo / d) for d in (".venv", "venv") if (repo / d).is_dir()), None)
+    if not venv:
+        return sys.executable, None  # ponytail: no declared environment, try the tool's own Python
+    return str(Path(venv) / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")), None
+
+
+def config():
+    f = Path(bp_file).parent / "config.json"  # one per repo: {"test": "shell command run in the copy instead of pytest"}
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
+def run_tests(tests, root):
+    custom = config().get("test")
+    if not tests and not custom:
         return {"status": "none", "detail": "no test covers these files", "files": []}
-    try:  # -o addopts="" : the project's own options need plugins and write report files
-        r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-x", "--no-header", "-p", "no:cacheprovider", "-o", "addopts=", *tests],
-                           cwd=wt, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    if custom:
+        cmd, shell = custom, True
+    else:
+        py, why = test_python()
+        if not py:
+            return {"status": "unrunnable", "detail": why, "files": tests}
+        # -o addopts="" : the project's own options need plugins and write report files
+        cmd, shell = [py, "-m", "pytest", "-q", "-x", "--no-header", "-p", "no:cacheprovider", "-o", "addopts=", *tests], False
+    try:
+        r = subprocess.run(cmd, shell=shell, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     except subprocess.TimeoutExpired:
         return {"status": "unrunnable", "detail": "tests timed out after 10 minutes", "files": tests}
-    last = (r.stdout.strip().splitlines() or [r.stderr.strip()[-200:]])[-1]
+    last = (r.stdout.strip().splitlines() or [r.stderr.strip()[-200:] or f"exit code {r.returncode}"])[-1]
+    if custom:
+        return {"status": "green" if r.returncode == 0 else "red", "detail": f"{custom}: {last}", "files": tests}
     # red only if pytest itself reports failed tests: "python -m pytest" without pytest installed also exits 1, and collection/import errors are not failures
     status = "green" if r.returncode == 0 else "red" if r.returncode == 1 and re.search(r"\d+ failed", r.stdout) else "unrunnable"
     return {"status": status, "detail": last, "files": tests}
 
 
+def before_after(tests, base):
+    """The same tests on the untouched code and on the run's result: a red test that was already red is not the run's fault."""
+    after = run_tests(tests, wt)
+    old = [t for t in tests if (base / t).exists()]  # a test file the run created has no "before"
+    after["before"] = run_tests(old, base) if old or config().get("test") else {"status": "none", "detail": "new tests", "files": []}
+    return after
+
+
 def discard(keep_plan=False):
-    git("worktree", "remove", "--force", str(wt), check=False)
+    for w in (wt, run_dir / "base"):  # base: left behind only if a run was killed while testing
+        git("worktree", "remove", "--force", str(w), check=False)
     git("worktree", "prune", check=False)
     for b in git("branch", "--list", "blueprint/run-*", check=False).split():
         if b != "*":
@@ -132,10 +176,15 @@ def run(prompt_file):
     except Exception as e:  # e.g. the agent left the graph builder unparsable
         arch = [f"! The blueprint could not be extracted from the changed code: {str(e)[:150]}"]
     groups = groups_of(git("diff", "--cached", "--name-only", cwd=wt).split())
-    for g in groups:
-        patch = git("diff", "--cached", "--binary", "--", *g["files"], cwd=wt)
-        (run_dir / f'{g["id"]}.patch').write_text(patch, encoding="utf-8", newline="")
-        g.update(title=", ".join(title(n) for n in g["nodes"]) or g["files"][0], diff=patch[:15000], tests=run_tests(tests_for(g["files"])))
+    base_wt = run_dir / "base"
+    git("worktree", "add", "--detach", str(base_wt), base)  # the untouched code, for the "before" test results
+    try:
+        for g in groups:
+            patch = git("diff", "--cached", "--binary", "--", *g["files"], cwd=wt)
+            (run_dir / f'{g["id"]}.patch').write_text(patch, encoding="utf-8", newline="")
+            g.update(title=", ".join(title(n) for n in g["nodes"]) or g["files"][0], diff=patch[:15000], tests=before_after(tests_for(g["files"]), base_wt))
+    finally:
+        git("worktree", "remove", "--force", str(base_wt), check=False)
     out.write_text(json.dumps({"base": base, "dirty": dirty, "summary": summary.strip()[:600], "permissions": permissions, "arch": arch, "plan": plan and {"summary": plan["summary"], "lines": plan["lines"]}, "conformance": conformance, "groups": groups}, ensure_ascii=False), encoding="utf-8")
     print(f"{len(groups)} file group(s) changed")
 
