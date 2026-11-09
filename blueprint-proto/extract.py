@@ -9,7 +9,12 @@ from itertools import combinations
 from pathlib import Path
 
 SKIP = {"__pycache__", ".git", "extension", "node_modules", ".terraform", ".venv", "venv", "site-packages", "dist", "build"}
-CODE_EXT = {".py", ".tf", ".yaml", ".yml", ".sh", ".toml", ".bat", ".cmd", ".ps1"}  # infra and scripts are architecture too
+JS_EXT = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+PROG_EXT = {".py"} | JS_EXT  # program code, as opposed to infrastructure and scripts
+CODE_EXT = PROG_EXT | {".tf", ".yaml", ".yml", ".sh", ".toml", ".bat", ".cmd", ".ps1"}  # infra and scripts are architecture too
+# import x from '…', import '…', import('…'), require('…'), export … from '…'
+JS_IMPORT = re.compile(r"""(?:\bimport\s+(?:type\s+)?[\w*{}\s,$]*?\s*from\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bexport\s+[\w*{}\s,$]*?\s*from\s*)['"]([^'"\n]+)['"]""")
+JS_ALIAS = ("@src/", "@/", "~/")  # ponytail: the usual aliases of src/; read vite/tsconfig paths if a repo uses another one
 
 
 def py_files(root):
@@ -92,9 +97,25 @@ def flat_structure(repo):
         p = f.relative_to(repo).parts
         if len(p) == 1:
             return "(root)"
-        if p[0] == "src":  # src layout: its packages are the components (src/api/x.py -> api); src/__init__.py and __main__.py join main
-            return "main" if len(p) == 2 and p[1] in ("__init__.py", "__main__.py") else p[1].removesuffix(".py")
+        if p[0] == "src":  # src layout: its packages are the components (src/api/x.py -> api); a loose Python module is its own,
+            if len(p) == 2 and (p[1] in ("__init__.py", "__main__.py") or not p[1].endswith(".py")):  # other loose files (App.tsx, main.tsx) join main
+                return "main"
+            return p[1].removesuffix(".py")
         return p[0]
+
+    def js_target(f, spec):
+        """The component a JS/TS import points to, or None for a package (react) or a path outside the repo."""
+        if spec.startswith("."):
+            dest = (f.parent / spec).resolve()
+        elif spec.startswith(JS_ALIAS):
+            dest = repo / "src" / spec.split("/", 1)[1]
+        else:
+            return None
+        try:
+            # a folder import is its index file; an extensionless one is a module file (never a loose file of src/ by mistake)
+            return comp(dest / "index.ts" if dest.is_dir() else dest if dest.suffix else dest.with_suffix(".ts"))
+        except ValueError:
+            return None
 
     target = lambda m: m.split(".")[1] if m.startswith("src.") else m.split(".")[0]  # import src.api.x -> component api
     nodes, text = {}, {}
@@ -103,7 +124,7 @@ def flat_structure(repo):
         n = nodes.setdefault(comp(f), {"id": comp(f), "files": 0, "lines": 0, "py_lines": 0, "paths": []})
         n["files"] += 1
         n["lines"] += text[f].count("\n") + 1
-        n["py_lines"] += (text[f].count("\n") + 1) if f.suffix == ".py" else 0
+        n["py_lines"] += (text[f].count("\n") + 1) if f.suffix in PROG_EXT else 0  # program lines (Python or JS/TS), the rest is infrastructure
         n["paths"].append(rel(f))
     names = {c for c in nodes if c != "(root)"}
     dirs = {c for c in names if (repo / c).is_dir() and c != "src"}  # path mentions only make sense for real top-level folders, not words like "api"
@@ -114,6 +135,12 @@ def flat_structure(repo):
         e["evidence"] += [x for x in evidence if x not in e["evidence"]]
 
     for f in files:  # 1. imports across components
+        if f.suffix in JS_EXT:
+            for spec in JS_IMPORT.findall(text[f]):
+                t = js_target(f, spec)
+                if t in names and t != comp(f):
+                    add(comp(f), t, "import", [f"{rel(f)} imports {spec}"])
+            continue
         if f.suffix != ".py":
             continue
         try:

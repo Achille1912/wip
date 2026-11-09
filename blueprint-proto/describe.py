@@ -10,7 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from extract import py_files
+from extract import JS_EXT, py_files
 
 LANG = os.environ.get("BLUEPRINT_LANG", "English")
 STYLE = (f"Write in {LANG}, at most 2 short sentences (under 40 words in total), for an engineer thinking about architecture. "
@@ -99,6 +99,10 @@ def digest(repo, rel):
             return f"{rel}: {(ast.get_docstring(t) or '')[:160]} | defines: {names}"
         except (SyntaxError, ValueError):
             pass
+    if f.suffix in JS_EXT:  # the first lines of a JS/TS file are imports: its exported names say more
+        names = re.findall(r"\bexport\s+(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|class|interface|type|enum)\s+(\w+)", text)
+        if names:
+            return f"{rel}: exports {', '.join(dict.fromkeys(names))}"[:260]
     lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not set(ln.strip()) <= set("-=#/ *")]
     return f"{rel}: " + " / ".join(lines[:8])[:260]
 

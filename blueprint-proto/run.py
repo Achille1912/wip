@@ -3,6 +3,7 @@ Usage: run.py <repo> <blueprint.js> <state dir> run <prompt file> | fix | check 
 Nothing touches the repo's working tree until `apply`; .env files are never copied into the worktree."""
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
@@ -103,8 +104,47 @@ def config():
     return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
 
 
+def npm_test():
+    """'npm test' for a JS project with a test script and no Python test setup."""
+    if any((repo / m).exists() for m in ("pytest.ini", "Pipfile", "poetry.lock", "setup.cfg")):
+        return None
+    try:
+        return "npm test --silent" if json.loads((repo / "package.json").read_text(encoding="utf-8")).get("scripts", {}).get("test") else None
+    except (OSError, ValueError):
+        return None
+
+
+def unlink_deps(w):
+    """Removes the borrowed node_modules link (only the link: the repo's own folder is never touched)."""
+    nm = w / "node_modules"
+    if os.path.isjunction(nm):
+        os.rmdir(nm)  # on a junction, rmdir removes the link itself
+    elif nm.is_symlink():
+        nm.unlink()
+
+
+def rm_wt(w):
+    unlink_deps(w)  # first, so removing the copy can never walk into the repo's node_modules
+    git("worktree", "remove", "--force", str(w), check=False)
+
+
 def run_tests(tests, root):
-    custom = config().get("test")
+    custom = config().get("test") or npm_test()
+    node = bool(custom) and (repo / "node_modules").is_dir() and not (root / "node_modules").exists()
+    if node:  # node_modules is not in git: the copy borrows the repo's while the tests run, and only then
+        nm = root / "node_modules"
+        if sys.platform == "win32":
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(nm), str(repo / "node_modules")], capture_output=True)
+        else:
+            os.symlink(repo / "node_modules", nm)
+    try:
+        return _run_tests(tests, root, custom)
+    finally:
+        if node:
+            unlink_deps(root)
+
+
+def _run_tests(tests, root, custom):
     if not tests and not custom:
         return {"status": "none", "detail": "no test covers these files", "files": []}
     if custom:
@@ -132,14 +172,14 @@ def before_after(tests, base, root=None):
     """The same tests on the untouched code and on the run's result (or root): a red test that was already red is not the run's fault."""
     after = run_tests(tests, root or wt)
     old = [t for t in tests if (base / t).exists()]  # a test file the run created has no "before"
-    after["before"] = run_tests(old, base) if old or config().get("test") else {"status": "none", "detail": "new tests", "files": []}
+    after["before"] = run_tests(old, base) if old or config().get("test") or npm_test() else {"status": "none", "detail": "new tests", "files": []}
     return after
 
 
 def discard(keep_plan=False):
     branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt, check=False).strip() if wt.is_dir() else ""  # only this view's run branch
     for w in (wt, run_dir / "base", run_dir / "sel"):  # base, sel: left behind only if a run or a check was killed while testing
-        git("worktree", "remove", "--force", str(w), check=False)
+        rm_wt(w)
     git("worktree", "prune", check=False)
     if branch.startswith("blueprint/run-"):
         git("branch", "-D", branch, check=False)
@@ -162,7 +202,7 @@ def finish(base, dirty, summary, permissions, plan):
     """Everything after the agent: file groups with their patches, tests before/after, and the architecture change against the base."""
     git("add", "-A", cwd=wt)
     base_wt = run_dir / "base"
-    git("worktree", "remove", "--force", str(base_wt), check=False)
+    rm_wt(base_wt)
     git("worktree", "add", "--detach", str(base_wt), base)  # the untouched code: "before" for the tests and for the architecture
     try:
         arch = conformance = None
@@ -181,7 +221,7 @@ def finish(base, dirty, summary, permissions, plan):
             (run_dir / f'{g["id"]}.patch').write_text(patch, encoding="utf-8", newline="")
             g.update(title=", ".join(title(n) for n in g["nodes"]) or g["files"][0], diff=patch[:15000], tests=before_after(tests_for(g["files"]), base_wt))
     finally:
-        git("worktree", "remove", "--force", str(base_wt), check=False)
+        rm_wt(base_wt)
     out.write_text(json.dumps({"base": base, "dirty": dirty, "summary": summary.strip()[:600], "permissions": permissions, "arch": arch, "plan": plan and {"summary": plan["summary"], "lines": plan["lines"]}, "conformance": conformance, "groups": groups}, ensure_ascii=False), encoding="utf-8")
     print(f"{len(groups)} file group(s) changed")
 
@@ -220,7 +260,7 @@ def check(ids):
     sel = [g for g in res["groups"] if g["id"] in ids]
     sw, bw = run_dir / "sel", run_dir / "base"
     for w in (sw, bw):
-        git("worktree", "remove", "--force", str(w), check=False)
+        rm_wt(w)
         git("worktree", "add", "--detach", str(w), res["base"])
     try:
         for g in sel:
@@ -229,7 +269,7 @@ def check(ids):
         res["selection"] = {"groups": sorted(g["id"] for g in sel), **before_after(tests, bw, sw)}
     finally:
         for w in (sw, bw):
-            git("worktree", "remove", "--force", str(w), check=False)
+            rm_wt(w)
     out.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
     print(f'selection of {len(sel)} group(s): {res["selection"]["status"]}')
 

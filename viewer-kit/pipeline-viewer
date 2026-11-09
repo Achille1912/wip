@@ -186,7 +186,7 @@ def file_py(root):
     for dp, dn, fn in os.walk(root):
         dn[:] = [d for d in dn if d not in SKIP and not d.startswith(".")]
         for f in fn:
-            if f.endswith(EXTS):
+            if f.endswith(EXTS) or f.startswith("Dockerfile"):  # same files as the blueprint's extract.code_files
                 p = os.path.join(dp, f)
                 try: out[os.path.relpath(p, root).replace(os.sep, "/")] = os.stat(p).st_mtime
                 except OSError: pass
