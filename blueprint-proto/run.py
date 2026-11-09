@@ -1,5 +1,5 @@
 """Run engine: notes -> agent in an isolated git worktree -> diff per file group + targeted tests.
-Usage: run.py <repo> <blueprint.js> <state dir> run <prompt file> | check <group,group> | apply <group,group> | discard
+Usage: run.py <repo> <blueprint.js> <state dir> run <prompt file> | fix | check <group,group> | apply <group,group> | discard
 Nothing touches the repo's working tree until `apply`; .env files are never copied into the worktree."""
 import asyncio
 import json
@@ -121,11 +121,11 @@ def run_tests(tests, root):
         return {"status": "unrunnable", "detail": "tests timed out after 10 minutes", "files": tests}
     last = (r.stdout.strip().splitlines() or [r.stderr.strip()[-200:] or f"exit code {r.returncode}"])[-1]
     if custom:
-        return {"status": "green" if r.returncode == 0 else "red", "detail": f"{custom}: {last}", "files": tests}
-    # red only if pytest itself reports failed or errored tests ("python -m pytest" without pytest also exits 1). An import error counts:
-    # one caused by the environment shows up before the run too, and the viewer then reads it as "already failing before"
-    status = "green" if r.returncode == 0 else "red" if r.returncode in (1, 2) and re.search(r"\d+ (failed|errors?)\b", r.stdout) else "unrunnable"
-    return {"status": status, "detail": last, "files": tests}
+        status, last = "green" if r.returncode == 0 else "red", f"{custom}: {last}"
+    else:  # red only if pytest itself reports failed or errored tests ("python -m pytest" without pytest also exits 1). An import error counts:
+        # one caused by the environment shows up before the run too, and the viewer then reads it as "already failing before"
+        status = "green" if r.returncode == 0 else "red" if r.returncode in (1, 2) and re.search(r"\d+ (failed|errors?)\b", r.stdout) else "unrunnable"
+    return {"status": status, "detail": last, "files": tests, **({"output": (r.stdout + r.stderr)[-3000:]} if status == "red" else {})}  # what "Fix" sends back
 
 
 def before_after(tests, base, root=None):
@@ -137,12 +137,12 @@ def before_after(tests, base, root=None):
 
 
 def discard(keep_plan=False):
+    branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt, check=False).strip() if wt.is_dir() else ""  # only this view's run branch
     for w in (wt, run_dir / "base", run_dir / "sel"):  # base, sel: left behind only if a run or a check was killed while testing
         git("worktree", "remove", "--force", str(w), check=False)
     git("worktree", "prune", check=False)
-    for b in git("branch", "--list", "blueprint/run-*", check=False).split():
-        if b != "*":
-            git("branch", "-D", b, check=False)
+    if branch.startswith("blueprint/run-"):
+        git("branch", "-D", branch, check=False)
     for p in run_dir.glob("*.patch"):
         p.unlink()
     out.unlink(missing_ok=True)
@@ -150,36 +150,32 @@ def discard(keep_plan=False):
         (state / "plan.json").unlink(missing_ok=True)
 
 
-def run(prompt_file):
-    discard(keep_plan=True)
-    plan = json.loads((state / "plan.json").read_text(encoding="utf-8")) if (state / "plan.json").exists() else None
-    run_dir.mkdir(parents=True, exist_ok=True)
-    dirty = bool(git("status", "--porcelain", "--untracked-files=no").strip())
-    base = git("rev-parse", "--short", "HEAD").strip()
-    git("worktree", "add", "-b", f"blueprint/run-{base}", str(wt), "HEAD")
-    try:
-        before = extract(wt)
-    except Exception:  # not a LangGraph-shaped repo: the run still works, only without the architecture diff
-        before = None
+def agent(prompt, on_fail):
     try:  # tool use the engineer has not pre-approved waits for an answer in the viewer (see agent.py)
-        summary, permissions = asyncio.run(asyncio.wait_for(run_agent(Path(prompt_file).read_text(encoding="utf-8"), wt, state), 3600))
+        return asyncio.run(asyncio.wait_for(run_agent(prompt, wt, state), 3600))
     except Exception as e:
-        discard(keep_plan=True)  # the plan survives a failed run: approve again or discard it
+        on_fail()
         raise RuntimeError(str(e)[:300] or type(e).__name__)
+
+
+def finish(base, dirty, summary, permissions, plan):
+    """Everything after the agent: file groups with their patches, tests before/after, and the architecture change against the base."""
     git("add", "-A", cwd=wt)
-    arch = conformance = None
+    base_wt = run_dir / "base"
+    git("worktree", "remove", "--force", str(base_wt), check=False)
+    git("worktree", "add", "--detach", str(base_wt), base)  # the untouched code: "before" for the tests and for the architecture
     try:
-        if before:
-            after = extract(wt)
+        arch = conformance = None
+        try:
+            before, after = extract(base_wt), extract(wt)
             atoms = arch_atoms(before, after)
             arch = [fmt(a) for a in atoms]
             conformance = check_plan(plan["items"], atoms, after[2]) if plan else None
-    except Exception as e:  # e.g. the agent left the graph builder unparsable
-        arch = [f"! The blueprint could not be extracted from the changed code: {str(e)[:150]}"]
-    groups = groups_of(git("diff", "--cached", "--name-only", cwd=wt).split())
-    base_wt = run_dir / "base"
-    git("worktree", "add", "--detach", str(base_wt), base)  # the untouched code, for the "before" test results
-    try:
+        except Exception as e:  # e.g. the agent left the graph builder unparsable
+            arch = [f"! The blueprint could not be extracted from the changed code: {str(e)[:150]}"]
+        groups = groups_of(git("diff", "--cached", "--name-only", cwd=wt).split())
+        for p in run_dir.glob("*.patch"):
+            p.unlink()
         for g in groups:
             patch = git("diff", "--cached", "--binary", "--", *g["files"], cwd=wt)
             (run_dir / f'{g["id"]}.patch').write_text(patch, encoding="utf-8", newline="")
@@ -188,6 +184,34 @@ def run(prompt_file):
         git("worktree", "remove", "--force", str(base_wt), check=False)
     out.write_text(json.dumps({"base": base, "dirty": dirty, "summary": summary.strip()[:600], "permissions": permissions, "arch": arch, "plan": plan and {"summary": plan["summary"], "lines": plan["lines"]}, "conformance": conformance, "groups": groups}, ensure_ascii=False), encoding="utf-8")
     print(f"{len(groups)} file group(s) changed")
+
+
+def run(prompt_file):
+    discard(keep_plan=True)
+    busy = [p.parent.parent.parent.name for p in Path(bp_file).parent.glob("views/*/.pipeline-viewer/run/wt") if p.resolve() != wt.resolve()]
+    if busy:  # one run per repo: two runs would start from the same commit and could not both be applied
+        raise RuntimeError(f"a run is already open in the {busy[0]} view of this repo: apply or discard it there first")
+    plan = json.loads((state / "plan.json").read_text(encoding="utf-8")) if (state / "plan.json").exists() else None
+    run_dir.mkdir(parents=True, exist_ok=True)
+    dirty = bool(git("status", "--porcelain", "--untracked-files=no").strip())
+    base = git("rev-parse", "--short", "HEAD").strip()
+    git("worktree", "add", "-B", f"blueprint/run-{state.parent.name}-{base}", str(wt), "HEAD")  # -B: a branch left by a killed run is reused
+    summary, permissions = agent(Path(prompt_file).read_text(encoding="utf-8"), lambda: discard(keep_plan=True))  # the plan survives a failed run
+    finish(base, dirty, summary, permissions, plan)
+
+
+def fix():
+    """Sends the tests this run broke back to the agent, in the same copy, then redoes diffs and tests. The earlier work is kept on failure."""
+    res = json.loads(out.read_text(encoding="utf-8"))
+    broken = [g for g in res["groups"] if g["tests"]["status"] == "red" and g["tests"].get("before", {}).get("status") != "red"]
+    if not broken:
+        raise RuntimeError("no test broken by this run")
+    prompt = ("Your previous change in this repository made these tests fail. Fix the code so they pass again, keeping what the change was meant to do. "
+              "Change a test only if the test itself is wrong, and say so.\n\n"
+              + "\n\n".join(f'Changed file(s): {", ".join(g["files"])}\nTests: {", ".join(g["tests"]["files"])}\nOutput:\n{g["tests"].get("output", g["tests"]["detail"])}' for g in broken))
+    plan = json.loads((state / "plan.json").read_text(encoding="utf-8")) if (state / "plan.json").exists() else None
+    summary, permissions = agent(prompt, lambda: None)
+    finish(res["base"], res["dirty"], res["summary"] + "\nFix: " + summary.strip(), res["permissions"] + permissions, plan)
 
 
 def check(ids):
@@ -223,6 +247,6 @@ def apply(ids):
 
 
 try:
-    {"run": lambda: run(sys.argv[5]), "check": lambda: check(set(sys.argv[5].split(","))), "apply": lambda: apply(set(sys.argv[5].split(",")) if len(sys.argv) > 5 else set()), "discard": discard}[cmd]()
+    {"run": lambda: run(sys.argv[5]), "fix": fix, "check": lambda: check(set(sys.argv[5].split(","))), "apply": lambda: apply(set(sys.argv[5].split(",")) if len(sys.argv) > 5 else set()), "discard": discard}[cmd]()
 except Exception as e:
     sys.exit(str(e))

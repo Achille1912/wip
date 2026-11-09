@@ -448,10 +448,10 @@ button,input,select{border-radius:6px}
 <div class="az" id="ar" hidden><input id="at" placeholder="Text"><input type="color" id="ac" aria-label="Color" style="flex:none;width:2.6rem;padding:.1rem"><button id="a1" aria-label="Smaller">−</button><button id="a2" aria-label="Bigger">+</button><button id="ad">Delete</button></div>
 <div class="az" id="qr" hidden><input id="qq" placeholder="Ask a question, or ask to change how this looks (color, shape, border, line…)"><select id="qm" aria-label="Model"><option>sonnet</option><option>opus</option><option>haiku</option></select><button id="qb">Ask</button></div><div id="qa" style="margin-top:.4rem;white-space:pre-wrap"></div></div>
 <div id="emp" class="nota">Select a block to see what it does, leave a note on it or ask about it. Ctrl K writes a note from the keyboard.</div>
-<div id="dock" class="isl"><div id="dt" role="tablist"><button data-p="run" id="tr" hidden>Run<i class="dot"></i></button><button data-p="notes">Notes <b id="nc">0</b></button><button data-p="rules" id="tl" hidden>Rules</button><button id="dk" aria-label="Collapse or expand the panel">▴</button></div>
+<div id="dock" class="isl"><div id="dt" role="tablist"><button data-p="run" id="tr" hidden>Run<i class="dot"></i></button><button data-p="notes">Notes <b id="nc">0</b></button><button data-p="runs" id="th2" hidden>Runs</button><button data-p="rules" id="tl" hidden>Rules</button><button id="dk" aria-label="Collapse or expand the panel">▴</button></div>
 <div id="dbody" hidden><div class="dp" data-p="run"><div id="pp" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Plan</h2><div id="pt" class="nota"></div><div id="pg"></div><div class="az" id="pa" hidden><button class="p" id="pok">Approve and run</button><button id="pdc">Discard plan</button></div></div>
-<div id="rn" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Run</h2><div id="rt" class="nota"></div><div id="rg"></div><div id="ckr" class="nota" hidden></div><div class="az" id="ra" hidden><button class="p" id="ap">Apply selected</button><button id="ck" hidden title="Apply only the ticked files to a clean copy and run their tests">Test this selection</button><button id="dc">Discard run</button></div></div>
-</div><div class="dp" data-p="notes"><div id="nl"></div></div><div class="dp" data-p="rules"><div id="rls" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Rules</h2><div class="az"><input id="ri" placeholder="Add an architecture rule in plain words, e.g. no Python file longer than 800 lines"><button class="p" id="ra2">Add rule</button><button id="rc">Check</button></div><div id="rm" class="nota"></div><div id="rr"></div></div>
+<div id="rn" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Run</h2><div id="rt" class="nota"></div><div id="rg"></div><div id="ckr" class="nota" hidden></div><div class="az" id="ra" hidden><button class="p" id="ap">Apply selected</button><button id="ck" hidden title="Apply only the ticked files to a clean copy and run their tests">Test this selection</button><button id="fx" hidden title="Send the failing tests back to the agent, in the same copy">Fix failing tests</button><button id="dc">Discard run</button></div></div>
+</div><div class="dp" data-p="notes"><div id="nl"></div></div><div class="dp" data-p="runs"><div id="hl"></div></div><div class="dp" data-p="rules"><div id="rls" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Rules</h2><div class="az"><input id="ri" placeholder="Add an architecture rule in plain words, e.g. no Python file longer than 800 lines"><button class="p" id="ra2">Add rule</button><button id="rc">Check</button></div><div id="rm" class="nota"></div><div id="rr"></div></div>
 </div></div></div></aside>
 <script src="/vendor/cytoscape.min.js"></script><script src="/vendor/elk.bundled.js"></script><script src="/vendor/cytoscape-node-html-label.min.js"></script>
 <script>
@@ -628,8 +628,8 @@ function implicite(){const E=cy.edges(".uso"),out={};E.forEach(e=>(out[e.data("s
 let DTAB="notes",DOPEN=false,DSIG="";
 function dockShow(tab,open){if(tab)DTAB=tab;if(open!=null)DOPEN=open;
  document.querySelectorAll("#dt [data-p]").forEach(b=>b.classList.toggle("on",DOPEN&&b.dataset.p==DTAB));
- document.querySelectorAll("#dbody .dp").forEach(q=>q.hidden=q.dataset.p!=DTAB);$("dbody").hidden=!DOPEN;$("dk").textContent=DOPEN?"▾":"▴"}
-function dockSync(n){$("tr").hidden=!((n.run&&n.run.enabled)||(n.plan&&n.plan.enabled));$("tl").hidden=!(n.caps&&n.caps.rules);
+ document.querySelectorAll("#dbody .dp").forEach(q=>q.hidden=q.dataset.p!=DTAB);$("dbody").hidden=!DOPEN;$("dk").textContent=DOPEN?"▾":"▴";if(tab=="runs"&&DOPEN)storia()}
+function dockSync(n){$("tr").hidden=!((n.run&&n.run.enabled)||(n.plan&&n.plan.enabled));$("th2").hidden=!(n.run&&n.run.enabled);$("tl").hidden=!(n.caps&&n.caps.rules);
  const p=n.plan||{},r=n.run||{},sig=(p.running?"p":"")+(p.result&&!(r.running||r.result)?"o":"")+(r.running?"r":"")+(r.result?"x":"")+(PERMN?"!":"");
  $("tr").classList.toggle("alive",!!sig);if(sig!==DSIG){DSIG=sig;if(sig)dockShow("run",true)}}  // something needs you in the Run tab: open it
 const BUSY={},bset=(k,v)=>{BUSY[k]=!!v;const on=Object.values(BUSY).some(Boolean);$("ld").className=on?(BUSY.perm?"on wait":"on"):""};  // top progress bar: any work in flight; amber while waiting for you
@@ -671,7 +671,7 @@ function runUi(r){if(!r)return;const x=r.result;$("ru").hidden=!r.enabled;$("ru"
  $("rn").hidden=!(r.running||x||r.ok===false);$("ra").hidden=!x;
  if(r.running)busy("rt","Running in an isolated copy of the repo");else idle("rt",r.ok===false?"Run failed: "+r.tail
   :x?`Based on commit ${x.base}${x.dirty?" (uncommitted changes are not included)":""}. ${x.summary}`:"");
- bset("run",r.running);$("ru").classList.toggle("busy",r.running);
+ bset("run",r.running);$("ru").classList.toggle("busy",r.running);$("ra").querySelectorAll("button").forEach(b=>b.disabled=r.running);  // a fix may be running on this copy
  const j=JSON.stringify(x||null);if(j===RUNJ)return;RUNJ=j;$("rg").replaceChildren();  // redraw only on change: keeps checkboxes and open diffs
  if(x&&x.conformance){const c=x.conformance,a=el("div","row");  // the plan made before the code, checked against what the code became
   a.append(el("b",null,"Plan check · "+(c.missing.length||c.unplanned.length?"differences found":"the result matches the plan")));
@@ -683,12 +683,22 @@ function runUi(r){if(!r)return;const x=r.result;$("ru").hidden=!r.enabled;$("ru"
  RX=x;for(const g of x?x.groups:[]){const d=el("details","row"),s=el("summary"),c=el("input"),t=tlabel(g.tests);c.type="checkbox";c.checked=!x.selection||x.selection.groups.includes(g.id);c.dataset.g=g.id;
   s.append(c,document.createTextNode(" "+g.title+" · "+g.files.join(", ")+" "),el("span","t "+t[1],t[0]));
   const pre=el("pre",null,g.diff);pre.style.cssText="white-space:pre-wrap;font-size:.75rem;max-height:20rem;overflow:auto";
-  d.append(s,el("div","nota","After: "+g.tests.detail+(g.tests.before?" · Before: "+g.tests.before.detail:"")),pre);$("rg").append(d)}selUi()}
+  d.append(s,el("div","nota","After: "+g.tests.detail+(g.tests.before?" · Before: "+g.tests.before.detail:"")),pre);$("rg").append(d)}selUi();
+ $("fx").hidden=!x||!x.groups.some(g=>tlabel(g.tests)[0]=="broken by this run"||g.tests.status=="red"&&(!g.tests.before||g.tests.before.status=="none"))}
+async function storia(){let j;try{j=await(await fetch("/api/runs")).json()}catch(e){return}const L=$("hl");L.replaceChildren();  // history: applied and discarded runs, newest first
+ if(!j.runs.length)return L.append(el("p","nota","No runs yet: every run you apply or discard is kept here, with its notes, diff and tests."));
+ for(const r of j.runs){const d=el("details","row"),s=el("summary"),br=r.groups.filter(g=>tlabel(g.tests)[0]=="broken by this run").length;
+  s.append(el("span","t "+(r.esito=="applied"?"fatta":"grigio"),r.esito),document.createTextNode(" "+new Date(r.quando).toLocaleString()+" · "+r.groups.length+" file"+(r.groups.length==1?"":"s")+(br?" · "+br+" broken by the run":"")));d.append(s);
+  for(const n of r.note)d.append(el("div","nota","Note on "+n.titolo+": "+n.nota));if(r.summary)d.append(el("div","nota",r.summary));
+  for(const g of r.groups){const x=el("details"),t=tlabel(g.tests),sm=el("summary"),pre=el("pre",null,g.diff||"");pre.style.cssText="white-space:pre-wrap;font-size:.75rem;max-height:20rem;overflow:auto";
+   sm.append(document.createTextNode((r.esito=="applied"&&!r.applicati.includes(g.id)?"(left out) ":"")+g.files.join(", ")+" "),el("span","t "+t[1],t[0]));x.append(sm,pre);d.append(x)}
+  if(r.esito=="discarded"&&r.note.length){const b=el("button",null,"Run these notes again");b.onclick=async()=>{await post({azione:"reopen",id:r.id},"/api/run");await runPost({azione:"start"});dockShow("run",true)};d.append(b)}
+  L.append(d)}}
 let RX=null;const runIds=()=>[...$("rg").querySelectorAll("input[data-g]:checked")].map(c=>c.dataset.g).sort();
 function selUi(){const x=RX,ids=runIds(),s=x&&x.selection,same=!!s&&JSON.stringify(s.groups)==JSON.stringify(ids);  // a partial selection is tested on its own before you apply it
  $("ck").hidden=!x||!ids.length||ids.length==x.groups.length||same;$("ckr").hidden=!same||ids.length==x.groups.length;
  if(same){const t=tlabel(s);$("ckr").className="nota "+t[1];$("ckr").textContent="Only the ticked files, tested on their own: "+t[0]+" · "+s.detail}}
-async function runPost(o){askNotify();const j=await post(o,"/api/run");$("rs").textContent=j.errore||"";RUNJ="";await carica();rules()}
+async function runPost(o){askNotify();const j=await post(o,"/api/run");$("rs").textContent=j.errore||"";RUNJ="";await carica();rules();if(DTAB=="runs")storia()}
 async function carica(){
  const n=await(await fetch("/api/pipeline")).json();stato(n.refresh);runUi(n.run);planUi(n.plan,n.run);permUi(n.perm);dockSync(n);CAPS=n.caps||{};
  if(n.errore){$("pl").textContent="Invalid spec: "+n.errore;return}
@@ -761,7 +771,7 @@ addEventListener("keydown",e=>{const k=e.key.toLowerCase();
 $("pn").onclick=()=>planPost({azione:"start",model:$("qm").value});$("pok").onclick=()=>planPost({azione:"approve"});$("pdc").onclick=()=>planPost({azione:"discard"});
 $("ru").onclick=()=>runPost({azione:"start"});$("dc").onclick=()=>runPost({azione:"discard"});
 $("ap").onclick=()=>runPost({azione:"apply",groups:runIds()});$("rg").addEventListener("change",selUi);
-$("ck").onclick=async()=>{$("ck").disabled=true;$("ck").textContent="Testing the selection…";try{await runPost({azione:"check",groups:runIds()})}finally{$("ck").disabled=false;$("ck").textContent="Test this selection"}};
+$("fx").onclick=()=>runPost({azione:"fix"});$("ck").onclick=async()=>{$("ck").disabled=true;$("ck").textContent="Testing the selection…";try{await runPost({azione:"check",groups:runIds()})}finally{$("ck").disabled=false;$("ck").textContent="Test this selection"}};
 $("cp").onclick=()=>copia("note");$("cm").onclick=()=>copia("modello");
 $("ok").onclick=salva;$("nn").onkeydown=e=>{if(e.key=="Enter")salva()};
 let boot=null;setInterval(async()=>{try{const b=(await(await fetch("/api/versione")).json()).boot;if(boot&&b!=boot)location.reload();boot=b}catch(e){}},2000);
@@ -839,15 +849,34 @@ def main():
                 if risposta: n["risposta"] = risposta
         scrivi_note(note)
 
-    def lancia_run(prompt_file):  # LOCK held by the caller
+    runs_dir = os.path.join(nota_dir, "runs")  # history: one file per applied or discarded run
+
+    def archivia(res, esito, applicati):  # LOCK held by the caller
+        note = [{k: n.get(k) for k in ("id", "target", "titolo", "nota")} for n in leggi_note() if n.get("stato") == "in lavorazione"]
+        rec = {"id": datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), "quando": datetime.datetime.now().isoformat(timespec="seconds"), "esito": esito,
+               "applicati": applicati, "note": note, "base": res.get("base"), "summary": res.get("summary", ""),
+               "groups": [{k: g.get(k) for k in ("id", "title", "files", "diff")} | {"tests": {k: v for k, v in g["tests"].items() if k != "output"}} for g in res["groups"]]}
+        os.makedirs(runs_dir, exist_ok=True)
+        with open(os.path.join(runs_dir, rec["id"] + ".json"), "w", encoding="utf-8") as f: json.dump(rec, f, ensure_ascii=False)
+
+    def leggi_runs():
+        try: names = sorted(os.listdir(runs_dir), reverse=True)[:50]
+        except OSError: return []
+        out = []
+        for n in names:
+            try: out.append(json.load(open(os.path.join(runs_dir, n), encoding="utf-8")))
+            except (OSError, ValueError): pass
+        return out
+
+    def lancia_run(arg):  # LOCK held by the caller; arg: 'run "<prompt file>"' or 'fix'
         def go():
             try:
-                r = subprocess.run(f'{A.run_cmd} run "{prompt_file}"', shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2400)
+                r = subprocess.run(f'{A.run_cmd} {arg}', shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2400)
                 RN.update(ok=r.returncode == 0, tail=(r.stderr or r.stdout).strip()[-300:])
             except Exception as e:
                 RN.update(ok=False, tail=str(e)[:300])
-            if not RN["ok"]:
-                with LOCK: set_stato(None, "aperta")  # failed run: the notes go back to open
+            if not RN["ok"] and not leggi_run():
+                with LOCK: set_stato(None, "aperta")  # failed run, nothing left to review: the notes go back to open (a failed fix keeps the run)
             RN["running"] = False
         RN.update(running=True, ok=None, tail="")
         threading.Thread(target=go, daemon=True).start()
@@ -1000,6 +1029,7 @@ def main():
                 try: return self.send(200, open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", self.path[8:]), encoding="utf-8").read(), "application/javascript")
                 except OSError: return self.j(404, {"errore": "missing library: also copy the vendor folder"})
             if self.path == "/api/versione": return self.j(200, {"boot": BOOT})
+            if self.path == "/api/runs": return self.j(200, {"runs": leggi_runs()})
             if self.path == "/api/pipeline": return self.j(200, {**dati(), "note": leggi_note(), "refresh": stato_refresh(), "perm": leggi_perm(), "plan": {"enabled": bool(A.plan_cmd), "running": PN["running"], "ok": PN["ok"], "tail": PN["tail"], "result": leggi_plan()}, "annot": leggi_annot(), "stili": leggi_stili(), "caps": {"rules": bool(A.rules_cmd), "ask": bool(A.ask_cmd)},
                                                   "run": {"enabled": bool(A.run_cmd), "running": RN["running"], "ok": RN["ok"], "tail": RN["tail"], "result": leggi_run()}})
             if self.path in ("/api/prompt?tipo=modello", "/api/prompt?tipo=note"):  # testo da incollare in Claude Code
@@ -1133,13 +1163,22 @@ def main():
                         os.makedirs(nota_dir, exist_ok=True); pf = os.path.join(nota_dir, "run-prompt.txt")
                         v = verifica(json.load(open(spec_path, encoding="utf-8")))
                         with open(pf, "w", encoding="utf-8") as f: f.write(prompt_note(aperte, *(v or (None, None))))
-                        set_stato({n["id"] for n in aperte}, "in lavorazione"); lancia_run(pf)
+                        set_stato({n["id"] for n in aperte}, "in lavorazione"); lancia_run(f'run "{pf}"')
                         return self.j(200, {"ok": True})
-                    if not res or az not in ("apply", "discard"): return self.j(400, {"errore": "invalid action"})
+                    if az == "reopen":  # the notes of a past run become open again, ready for a new run
+                        rec = next((x for x in leggi_runs() if x["id"] == d.get("id")), None)
+                        if not rec: return self.j(400, {"errore": "unknown run"})
+                        set_stato({n["id"] for n in rec["note"]}, "aperta")
+                        return self.j(200, {"ok": True})
+                    if not res or az not in ("apply", "discard", "fix"): return self.j(400, {"errore": "invalid action"})
+                    if az == "fix":
+                        lancia_run("fix")
+                        return self.j(200, {"ok": True})
                     g = d.get("groups") if isinstance(d.get("groups"), list) else []
                     keep = [x for x in g if x in {y["id"] for y in res["groups"]}] if az == "apply" else []  # only ids the run itself produced reach the shell
                     r = subprocess.run(f'{A.run_cmd} {az} "{",".join(keep)}"', shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
                     if r.returncode: return self.j(500, {"errore": (r.stderr or r.stdout).strip()[-300:]})
+                    archivia(res, "applied" if az == "apply" else "discarded", keep)
                     RN.update(ok=None, tail="")
                     set_stato(None, "fatta" if az == "apply" else "aperta", "Applied after review" if az == "apply" else None)
                     if az == "apply" and A.refresh_cmd: lancia_refresh()  # the code just changed: redraw the blueprint from it
