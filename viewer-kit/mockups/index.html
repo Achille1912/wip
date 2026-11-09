@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blueprint UI mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Three directions on the same screen (remediation pipeline, a block selected, a note, a plan, a permission request).
+   Rules taken from taste-skill: one visual system (one button pair, one card, one radius scale), no violet, plain copy,
+   buttons are verb + object, at most two boxes deep, quiet hover (lift 2px, press on click). */
+:root{--f:"Inter",system-ui,sans-serif;--m:"JetBrains Mono",ui-monospace,monospace}
+[data-d="graphite"]{--bg:#111214;--canvas:#141518;--dot:#ffffff14;--panel:#1a1c20;--line:#ffffff17;--ink:#eceef1;--mute:#8b919b;--acc:#4c8dff;--acc-ink:#fff;
+  --node:#1d2026;--node-line:#ffffff1f;--ai:#2fb8a6;--ok:#3ccf8e;--warn:#f0a94a;--r:10px;--edge:#ffffff55;--group:#ffffff0a;--note:#f3e7a8}
+[data-d="paper"]{--bg:#f4f3ef;--canvas:#fbfaf7;--dot:#1d4ed81a;--panel:#ffffff;--line:#1a1a1a1f;--ink:#16171a;--mute:#6a6f78;--acc:#1d4ed8;--acc-ink:#fff;
+  --node:#ffffff;--node-line:#16171a33;--ai:#0f766e;--ok:#15803d;--warn:#b45309;--r:3px;--edge:#16171a66;--group:#1d4ed808;--note:#fff3b0}
+[data-d="midnight"]{--bg:#07080a;--canvas:#0b0c0f;--dot:#ffffff0d;--panel:#0f1115;--line:#ffffff12;--ink:#f5f6f8;--mute:#7d838d;--acc:#e8ff5a;--acc-ink:#0b0c0f;
+  --node:#12151a;--node-line:#ffffff14;--ai:#5ad1ff;--ok:#6cf0a4;--warn:#ffb35a;--r:6px;--edge:#ffffff40;--group:#ffffff06;--note:#e8ff5a}
+*{box-sizing:border-box;margin:0}
+body{font:14px/1.45 var(--f);background:#0d0e10;color:#ddd;padding:24px}
+.pick{display:flex;gap:8px;align-items:center;margin:0 auto 16px;max-width:1440px;font-weight:600}
+.pick button{font:600 13px var(--f);padding:8px 14px;border-radius:99px;border:1px solid #ffffff2a;background:#1b1d21;color:#ddd;cursor:pointer}
+.pick button.on{background:#fff;color:#111}
+.pick span{color:#888;font-weight:500;margin-left:8px}
+/* the app */
+.app{position:relative;width:1440px;height:900px;margin:0 auto;background:var(--bg);color:var(--ink);border-radius:14px;overflow:hidden;border:1px solid #ffffff1a;
+  display:grid;grid-template-columns:52px 1fr 360px;grid-template-rows:56px 1fr;font-family:var(--f)}
+.top{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.logo{width:26px;height:26px;border-radius:var(--r);background:var(--acc);display:grid;place-items:center;color:var(--acc-ink);font-weight:800;font-size:13px}
+.proj{font-weight:700}.proj small{color:var(--mute);font-weight:500;margin-left:6px}
+.tabs{display:flex;gap:2px;padding:3px;border-radius:calc(var(--r) + 3px);background:var(--line)}
+.tabs b{padding:5px 12px;border-radius:var(--r);font-weight:600;font-size:13px;color:var(--mute)}.tabs b.on{background:var(--panel);color:var(--ink)}
+.acts{display:flex;gap:8px}
+.status{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--mute);font-size:13px}
+.status i{width:8px;height:8px;border-radius:50%;background:var(--warn)}
+.btn{font:600 13px var(--f);padding:8px 14px;border-radius:var(--r);border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;transition:transform .12s}
+.btn:hover{transform:translateY(-1px)}.btn:active{transform:translateY(1px)}
+.btn.p{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
+.rail{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:12px}
+.rail b{width:34px;height:34px;border-radius:var(--r);display:grid;place-items:center;color:var(--mute);font-weight:600}.rail b.on{background:var(--line);color:var(--ink)}
+.rail hr{width:22px;border:0;border-top:1px solid var(--line);margin:4px 0}
+/* canvas */
+.cv{position:relative;background:var(--canvas);background-image:radial-gradient(circle,var(--dot) 1.2px,transparent 1.4px);background-size:22px 22px;overflow:hidden}
+.grp{position:absolute;border:1px dashed var(--node-line);border-radius:calc(var(--r) + 6px);background:var(--group)}
+.grp span{position:absolute;top:-11px;left:14px;padding:1px 8px;background:var(--canvas);color:var(--mute);font:600 11px var(--f);letter-spacing:.08em;text-transform:uppercase}
+.n{position:absolute;width:230px;padding:12px 14px;border-radius:var(--r);background:var(--node);border:1px solid var(--node-line);box-shadow:0 1px 2px #0003;transition:transform .12s}
+.n:hover{transform:translateY(-2px)}
+.n .k{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--mute);font-weight:600}
+.n .k .ai{color:var(--ai)}.n .k em{margin-left:auto;font-style:normal}
+.n h4{font-size:15px;margin:3px 0 4px}.n p{font-size:12px;color:var(--mute);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.n.sel{border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 30%,transparent)}
+.n .noted{position:absolute;top:-8px;right:-8px;width:20px;height:20px;border-radius:50%;background:var(--warn);color:#111;font:700 11px var(--f);display:grid;place-items:center}
+svg.e{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+svg.e path{fill:none;stroke:var(--edge);stroke-width:1.6}
+.lbl{position:absolute;font:500 11px var(--m);color:var(--mute);background:var(--canvas);padding:1px 6px;border-radius:4px}
+.sticky{position:absolute;width:150px;padding:10px 12px;background:var(--note);color:#1b1b1b;font-size:13px;border-radius:2px;transform:rotate(-1.5deg);box-shadow:0 6px 16px #0003}
+.zoom{position:absolute;right:14px;bottom:14px;display:flex;gap:2px;padding:3px;border-radius:calc(var(--r) + 3px);background:var(--panel);border:1px solid var(--line)}
+.zoom b{padding:4px 10px;font-size:12px;color:var(--mute)}
+.toast{position:absolute;top:16px;right:16px;width:400px;padding:14px 16px;border-radius:var(--r);background:var(--panel);border:1px solid var(--warn);box-shadow:0 18px 40px #0006}
+.toast h5{font-size:14px}.toast code{display:block;margin:8px 0 12px;font:12px var(--m);color:var(--mute)}
+.toast .row{display:flex;gap:8px}
+/* inspector */
+.ins{border-left:1px solid var(--line);background:var(--panel);overflow:hidden;display:flex;flex-direction:column}
+.sec{padding:16px 18px;border-bottom:1px solid var(--line)}
+.sec h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin-bottom:10px;display:flex;justify-content:space-between}
+.sec h2{font-size:20px;letter-spacing:-.01em}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 10px}.tags b{font:500 11px var(--m);padding:2px 7px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+.sec p{font-size:13px;color:var(--mute)}
+.proof{margin-top:10px;font:12px var(--m);color:var(--ok)}
+textarea{width:100%;height:68px;resize:none;border-radius:var(--r);border:1px solid var(--line);background:var(--canvas);color:var(--ink);font:13px var(--f);padding:10px}
+.act{display:flex;gap:8px;margin-top:8px;justify-content:flex-end}
+.note{font-size:13px;padding:10px 12px;border-radius:var(--r);background:var(--canvas);border:1px solid var(--line)}
+.note b{display:block;font-size:12px;color:var(--mute);margin-bottom:2px}
+.plan li{list-style:none;font:12.5px var(--m);padding:3px 0}.plan li.add{color:var(--ok)}.plan li.lim{color:var(--mute)}
+.plan ul{padding:0;margin:6px 0 10px}
+/* midnight: a command bar instead of the top buttons */
+.cmd{display:none;position:absolute;left:50%;bottom:22px;transform:translateX(-50%);width:560px;padding:10px 12px;border-radius:12px;background:var(--panel);border:1px solid var(--line);box-shadow:0 18px 40px #0008;align-items:center;gap:10px;color:var(--mute)}
+.cmd kbd{font:600 11px var(--m);padding:2px 6px;border-radius:4px;border:1px solid var(--line)}
+[data-d="midnight"] .cmd{display:flex}[data-d="midnight"] .top .acts{display:none}
+[data-d="paper"] .n{box-shadow:none}[data-d="paper"] .n h4{font-family:var(--m);font-size:14px;font-weight:500}
+[data-d="paper"] .grp{border-style:solid}
+</style>
+</head>
+<body>
+<div class="pick"><button data-p="graphite" class="on">A · Graphite</button><button data-p="paper">B · Paper blueprint</button><button data-p="midnight">C · Midnight command</button><span id="why"></span></div>
+<div class="app" id="app" data-d="graphite">
+  <header class="top">
+    <div class="logo">B</div>
+    <div class="proj">remediation<small>main · a9f3e3c</small></div>
+    <div class="tabs"><b class="on">Pipeline</b><b>Structure</b></div>
+    <div class="status"><i></i>Code changed since the last refresh <button class="btn">Refresh blueprint</button></div>
+    <div class="acts"><button class="btn">Plan changes</button><button class="btn p">Run 1 note</button></div>
+  </header>
+  <nav class="rail"><b class="on">↖</b><b>✋</b><hr><b>▭</b><b>◯</b><b>T</b><b>☺</b></nav>
+  <main class="cv">
+    <div class="grp" style="left:40px;top:40px;width:560px;height:170px"><span>Intake</span></div>
+    <div class="grp" style="left:40px;top:260px;width:560px;height:170px"><span>Checks</span></div>
+    <div class="grp" style="left:40px;top:480px;width:850px;height:170px"><span>Reporting</span></div>
+    <svg class="e"><defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--edge)" stroke="none"/></marker></defs>
+      <path d="M290 125 H340" marker-end="url(#ar)"/><path d="M455 175 V240 H175 V292" marker-end="url(#ar)"/><path d="M290 345 H340" marker-end="url(#ar)"/>
+      <path d="M455 395 V460 H175 V512" marker-end="url(#ar)"/><path d="M290 565 H340" marker-end="url(#ar)"/><path d="M570 565 H620" marker-end="url(#ar)"/></svg>
+    <div class="n" style="left:60px;top:78px"><div class="k">STEP <em>8 inside</em></div><h4>Classify site</h4><p>Decides the kind of site up front so later scanning can adapt.</p></div>
+    <div class="n sel" style="left:342px;top:78px"><span class="noted">1</span><div class="k">STEP <em>8 inside</em></div><h4>Crawl site</h4><p>Crawls the site and runs the accessibility scan, or loads uploaded files.</p></div>
+    <div class="n" style="left:60px;top:298px"><div class="k"><span class="ai">● AI STEP</span><em>7 inside</em></div><h4>Manual scan</h4><p>LLM check for issues automated tools miss.</p></div>
+    <div class="n" style="left:342px;top:298px"><div class="k">STEP <em>7 inside</em></div><h4>Interaction checker</h4><p>Keyboard, focus and dynamic-behaviour checks.</p></div>
+    <div class="n" style="left:60px;top:518px"><div class="k"><span class="ai">● AI STEP</span><em>7 inside</em></div><h4>Generate docx</h4><p>Writes the compliance report.</p></div>
+    <div class="n" style="left:342px;top:518px"><div class="k"><span class="ai">● AI STEP</span><em>6 inside</em></div><h4>Verification checklist</h4><p>Lists what a reviewer must confirm by hand.</p></div>
+    <div class="n" style="left:622px;top:518px"><div class="k">STEP <em>7 inside</em></div><h4>Broken links xlsx</h4><p>Spreadsheet of dead links found while crawling.</p></div>
+    <div class="sticky" style="left:700px;top:190px">retry on timeout? 👀</div>
+    <div class="toast"><h5>The agent asks to run a command</h5><code>python -c "from src.utils.run_marker import run_marker"</code>
+      <div class="row"><button class="btn p">Allow once</button><button class="btn">Allow for this run</button><button class="btn">Deny</button></div></div>
+    <div class="cmd"><kbd>⌘K</kbd>Describe a change to the selected block…<span style="margin-left:auto"><kbd>P</kbd> plan &nbsp;<kbd>R</kbd> run</span></div>
+    <div class="zoom"><b>−</b><b>100%</b><b>+</b><b>Fit</b></div>
+  </main>
+  <aside class="ins">
+    <div class="sec"><h3>Selected <span>Step · Intake</span></h3><h2>Crawl site</h2>
+      <div class="tags"><b>playwright</b><b>axe-core</b><b>crawler</b></div>
+      <p>Crawls the target site and runs the accessibility scan, or loads uploaded files, so every later check works on the same sources.</p>
+      <div class="proof">✓ src/pipeline/nodes.py:crawl_site</div></div>
+    <div class="sec"><h3>Note</h3><textarea>Add src/utils/run_marker.py with run_marker() returning 'ok', then run it once.</textarea>
+      <div class="act"><button class="btn">Open inside</button><button class="btn p">Save note</button></div></div>
+    <div class="sec plan"><h3>Plan <span>ready</span></h3><p>Adds one utility module; running it is a check, not a structural change.</p>
+      <ul><li class="add">+ module src/utils/run_marker.py</li><li class="lim">= nothing else changes</li></ul>
+      <div class="act" style="justify-content:flex-start"><button class="btn p">Approve and run</button><button class="btn">Discard plan</button></div></div>
+    <div class="sec"><h3>Notes <span>1 open</span></h3><div class="note"><b>Crawl site</b>Add src/utils/run_marker.py…</div></div>
+  </aside>
+</div>
+<script>
+const why={graphite:"Dark, soft radius, one blue accent. AI steps get a teal dot instead of violet. Closest to today: lowest-risk refactor.",
+ paper:"Light, sharp radius, blueprint-blue dots, mono titles: reads like a technical drawing, prints well.",
+ midnight:"High contrast, lime accent, a command bar replaces the top buttons: keyboard-first."};
+const set=d=>{document.getElementById("app").dataset.d=d;document.querySelectorAll(".pick button").forEach(b=>b.classList.toggle("on",b.dataset.p==d));document.getElementById("why").textContent=why[d]};
+document.querySelectorAll(".pick button").forEach(b=>b.onclick=()=>set(b.dataset.p));set(new URLSearchParams(location.search).get("d")||"graphite");
+</script>
+</body>
+</html>

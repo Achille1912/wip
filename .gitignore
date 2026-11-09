@@ -1,0 +1,14 @@
+__pycache__/
+*.egg-info/
+# old manual backups, replaced by git history
+*.bak*
+# generated per repo: blueprint, descriptions, views, notes, runs (may hold client code summaries)
+blueprint-proto/work/
+blueprint-proto/.llm_cache.json
+.pipeline-viewer/
+# rendered video and footage (large binaries)
+brag-output/
+# old remediation outputs from before work/ existed
+blueprint-proto/blueprint.js
+blueprint-proto/descriptions.js
+blueprint-proto/detail.json

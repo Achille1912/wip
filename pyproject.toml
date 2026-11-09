@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blueprint"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["claude-agent-sdk==0.2.168"]  # the version these scripts were tested with
+
+[project.scripts]
+blueprint = "blueprint_cli:main"
+
+[tool.setuptools]
+# only the launcher is a module; it finds the other scripts and viewer-kit next to its own file (editable install)
+py-modules = ["blueprint_cli"]
+package-dir = { "" = "blueprint-proto" }

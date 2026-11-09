@@ -1,0 +1,1162 @@
+#!/usr/bin/env python3
+"""pipeline-viewer: schema cliccabile e zoomabile di una pipeline, con note dell'utente e aggiornamento dal vivo.
+Un solo file, solo libreria standard. Uso:
+  pipeline-viewer --init            crea pipeline.spec.json di esempio
+  pipeline-viewer [spec.json]       avvia su http://127.0.0.1:8766/   (--port per cambiare)
+La spec e' un JSON (vedi --init). Si modifica la spec: la pagina si aggiorna da sola.
+Le note stanno in <cartella della spec>/.pipeline-viewer/note.json."""
+import argparse, ast, datetime, hashlib, hmac, html, json, os, re, secrets, subprocess, sys, tempfile, threading, time, warnings
+warnings.filterwarnings("ignore", category=SyntaxWarning)  # ast.parse segnala escape non validi del codice analizzato
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+ESEMPIO = {
+    "titolo": "Esempio: elaborazione di un ordine",
+    "blocchi": [
+        {"id": "ingresso", "testo": "Ordine in arrivo|dal sito web", "tipo": "actor", "codice": "api/orders.py",
+         "interno": {"titolo": "Da dove arrivano gli ordini", "nodi": [
+             {"id": "web", "testo": "Sito web", "tipo": "actor"}, {"id": "app", "testo": "App mobile", "tipo": "actor"},
+             {"id": "coda", "testo": "Coda degli ordini", "tipo": "store", "codice": "queue.py"}],
+             "archi": [["web", "coda"], ["app", "coda"]]}},
+        {"id": "valida", "testo": "Dati validi?|indirizzo, importo", "tipo": "dec", "codice": "validate()"},
+        {"id": "ok", "testo": "Ordine accettato", "tipo": "ok"},
+        {"id": "ko", "testo": "Rifiutato|avvisa il cliente", "tipo": "prop", "auto": True}],
+    "archi": [["ingresso", "valida"], ["valida", "ok", "sì"], ["valida", "ko", "no"]],
+}
+TIPI = ("step", "dec", "ok", "prop", "ai", "store", "actor")
+
+
+def esc(t):
+    return html.escape(str(t), quote=False)
+
+
+def vista(pid, titolo, nodi, archi, ver=None, posiz=None, gruppi=None, esterni=None):
+    """Descrive un grafo per la pagina: ritorna (vista, meta). Nessuna geometria: layout (ELK) e disegno (Cytoscape) stanno nella
+    pagina. posiz = {id: [x, y]} sono i nodi che l'utente ha trascinato a mano; "trasversale" = usato da quasi tutti, senza frecce.
+    Per farsi capire: un nodo senza frecce interne mostra le sue relazioni vere con altri blocchi (esterni = [{da, altro, dir, et, pr,
+    titolo, d}], riquadri "esterno" che si aprono) e, se non ne ha, una nota UML con la sua descrizione. Ogni id di nodo/freccia e'
+    pre + k, con k locale (e' la chiave delle posizioni salvate)."""
+    posiz = posiz or {}
+    ids = [n["id"] for n in nodi]
+    nodo = {n["id"]: n for n in nodi}
+    righe = {i: str(nodo[i]["testo"]).split("|") for i in ids}
+    archi = [a for a in archi if a[0] in nodo and a[1] in nodo and not nodo[a[0]].get("trasversale") and not nodo[a[1]].get("trasversale")]
+    succ = {i: [] for i in ids}
+    for a, b, *_ in archi: succ[a].append(b)
+    stato, indietro = {}, set()  # archi all'indietro = quelli che chiudono un ciclo (visita in profondita')
+    def visita(u):
+        stato[u] = 1
+        for v in succ[u]:
+            if stato.get(v) == 1: indietro.add((u, v))
+            elif v not in stato: visita(v)
+        stato[u] = 2
+    sys.setrecursionlimit(10000)
+    for i in ids:
+        if i not in stato: visita(i)
+    pre = f"{pid}/" if pid else ""
+    meta, vn, va, vg, grp = {}, [], [], [], {}
+    tipo_arco = lambda pr: "flusso" if pr and pr.startswith("grafo") else "uso"  # UML: flusso del grafo (continua) o dipendenza (tratteggiata)
+    for g in gruppi or []:  # un nodo sta in un solo riquadro: vale il primo che lo elenca
+        mem = [x for x in g.get("nodi", []) if x in nodo and x not in grp]
+        if not mem: continue
+        gid = f"{pre}#{g['id']}"; tit = g.get("titolo", g["id"])
+        for x in mem: grp[x] = gid
+        vg.append({"id": gid, "titolo": tit, "colore": g.get("colore", "grigio"), "d": g.get("descrizione", ""), "dir": g.get("direzione", "")})
+        meta[gid] = {"tipo": "gruppo", "titolo": tit, "dettaglio": "", "codice": "", "descrizione": g.get("descrizione", ""), "verifica": "", "dentro": titolo}
+    for a, b, *rest in archi:
+        lab, desc = (rest + ["", ""])[:2]  # arco = [da, a, etichetta?, descrizione?]
+        if len(rest) > 3 and rest[3] not in ("", "imports", "depends_on"): lab = lab if lab.lower().startswith(rest[3].rstrip("s")) else f"{rest[3]} · {lab}" if lab else rest[3]  # 6th item: link type, unless the label already starts with it
+        eid = f"{pre}{a}>{b}"; pr = ver["archi"].get(eid) if ver else None
+        va.append({"id": eid, "a": pre + a, "b": pre + b, "label": lab, "ty": rest[3] if len(rest) > 3 else "", "da": (a, b) in indietro, "senza": pr == "", "k": tipo_arco(pr)})
+        meta[eid] = {"tipo": "freccia", "titolo": f"{righe[a][0]} → {righe[b][0]}" + (f" ({lab})" if lab else ""), "dettaglio": ("type: " + rest[3]) if len(rest) > 3 and rest[3] else "", "codice": "", "descrizione": desc,
+                     "verifica": "no proof in the code" if pr == "" else pr if pr and pr.startswith("relazione dichiarata") else f"prova nel codice: {pr}" if pr else ""}
+    note_txt = {}  # id nodo -> testo della nota UML da attaccargli
+    for i in ids:
+        n = nodo[i]; v = ver["stati"].get(pre + i) if ver else None
+        ver_t = "" if not v or v["stato"] == "ok" else ("Code not found: " + ", ".join(v["rotte"]) if v["rotte"] else "The code of this block changed since the last refresh")
+        det = "external system: relations are declared, not verifiable in the code" if n.get("esterno") else " ".join(righe[i][1:])
+        if n.get("trasversale") and ver and pre + i in ver.get("usato", {}):
+            nomi = [nodo[x]["testo"].split("|")[0] for x in ver["usato"][pre + i] if x in nodo]
+            det = "Usato da: " + ", ".join(nomi)
+            note_txt[i] = "Usato da: " + ", ".join(nomi[:9]) + (f" e altri {len(nomi) - 9}" if len(nomi) > 9 else "")
+        vn.append({"id": pre + i, "k": i, "titolo": righe[i][0], "sotto": " ".join(righe[i][1:]), "tipo": n["tipo"], "d": n.get("descrizione", ""),
+                   "w": 300, "h": 66 + 17 * min(6, -(-len(n.get("descrizione") or " ".join(righe[i][1:])) // 36)) + (28 if n.get("descrizione") and len(righe[i]) > 1 else 0),
+                   "in": len((n.get("interno") or {}).get("nodi", [])), "lc": n.get("colore", ""), "auto": bool(n.get("auto")),
+                   "ultimo": bool(n.get("trasversale")), "gruppo": grp.get(i, ""),
+                   "stato": {"rotto": "rotto", "da riverificare": "giallo"}.get(v["stato"], "") if v else ""})
+        meta[pre + i] = {"tipo": "nodo", "titolo": righe[i][0], "dettaglio": det, "codice": n.get("codice") or ", ".join(n.get("ancore", []))[:400],
+                         "descrizione": n.get("descrizione", ""), "dentro": titolo, "verifica": ver_t}
+    for r in esterni or []:  # relazioni vere con altri blocchi, come riquadri "esterno"
+        gid = f"{pre}@{r['altro']}"
+        if gid not in meta:
+            vn.append({"id": gid, "k": "@" + r["altro"], "titolo": r["titolo"], "sotto": "", "tipo": "ext", "d": r["d"], "w": 300, "h": 62 + 17 * min(2, -(-len(r["d"]) // 36)),
+                       "auto": False, "ultimo": False, "gruppo": "", "stato": "", "apri": r["altro"]})
+            meta[gid] = {"tipo": "esterno", "titolo": r["titolo"], "dettaglio": "block outside this view: double-click to open it", "codice": "",
+                         "descrizione": r["d"], "verifica": "", "dentro": titolo, "apri": r["altro"]}
+        a, b = (pre + r["da"], gid) if r["dir"] == "out" else (gid, pre + r["da"])
+        eid = f"{a}>{b[len(pre):]}" if r["dir"] == "out" else f"{gid}>{r['da']}"
+        va.append({"id": eid, "a": a, "b": b, "label": r["et"][:26], "da": False, "senza": False, "k": tipo_arco(r["pr"])})
+        meta[eid] = {"tipo": "freccia", "titolo": f"{meta[a]['titolo']} → {meta[b]['titolo']}", "dettaglio": "", "codice": "", "descrizione": "",
+                     "verifica": f"prova nel codice: {r['pr']}"}
+    conn = {x for e in va for x in (e["a"], e["b"])}
+    for i in ids:  # nodo ancora solo: una nota UML con la sua descrizione lo spiega
+        txt = note_txt.get(i) or (nodo[i].get("descrizione") if pre + i not in conn else "")
+        if not txt: continue
+        nid = f"{pre}~{i}"
+        vn.append({"id": nid, "k": "~" + i, "titolo": "", "sotto": txt, "tipo": "nota", "d": "", "w": 250, "h": min(170, 28 + 16 * -(-len(txt) // 38)), "auto": False, "ultimo": False,
+                   "dopo": bool(nodo[i].get("trasversale")),
+                   "gruppo": grp.get(i, ""), "stato": ""})
+        va.append({"id": f"{nid}>{i}", "a": pre + i, "b": nid, "label": "", "da": False, "senza": False, "k": "nota"})
+        meta[nid] = {"tipo": "nota", "titolo": "Note on " + righe[i][0], "dettaglio": "", "codice": "", "descrizione": txt, "verifica": "", "dentro": titolo}
+        meta[f"{nid}>{i}"] = {"tipo": "freccia", "titolo": f"Nota → {righe[i][0]}", "dettaglio": "", "codice": "", "descrizione": "", "verifica": ""}
+    pos = {pre + k: p for k, p in posiz.items()}
+    return {"titolo": titolo, "nodi": vn, "archi": va, "gruppi": vg, "pos": pos}, meta
+
+
+def valida(spec):
+    """Ritorna un messaggio d'errore leggibile, o ''."""
+    def grafo(nodi, archi, dove):
+        ids = [n.get("id") for n in nodi]
+        if len(set(ids)) != len(ids) or not all(isinstance(i, str) and i and "/" not in i and ">" not in i for i in ids):
+            return f"{dove}: id mancanti, doppi o con / e >"
+        for n in nodi:
+            if n.get("tipo") not in TIPI or not n.get("testo"): return f"{dove}: nodo «{n.get('id')}» senza testo o con tipo non valido (usa {', '.join(TIPI)})"
+        for a in archi:
+            if len(a) < 2 or a[0] not in ids or a[1] not in ids: return f"{dove}: arco {a} verso un nodo inesistente"
+        return ""
+    def gruppi(nodi, gr, dove):
+        ids = {n["id"] for n in nodi}
+        for g in gr or []:
+            if not isinstance(g.get("id"), str) or not g["id"] or "/" in g["id"] or ">" in g["id"]: return f"{dove}: gruppo senza id valido"
+            if any(x not in ids for x in g.get("nodi", [])): return f"{dove}: il gruppo «{g['id']}» elenca un nodo inesistente"
+        return ""
+    if not isinstance(spec, dict) or not spec.get("blocchi"): return "la spec deve avere «blocchi»"
+    m = grafo(spec["blocchi"], spec.get("archi", []), "schema") or gruppi(spec["blocchi"], spec.get("gruppi"), "schema")
+    for b in spec["blocchi"]:
+        if not m and b.get("interno"):
+            m = grafo(b["interno"].get("nodi", []), b["interno"].get("archi", []), f"interno di {b['id']}") \
+                or gruppi(b["interno"].get("nodi", []), b["interno"].get("gruppi"), f"interno di {b['id']}")
+    return m
+
+
+FORMATO = ("Formato spec: {titolo, infrastruttura:[prefissi di percorso], gruppi:[{id, titolo, colore:blu|verde|viola|arancio|giallo|grigio, nodi:[id blocchi], descrizione, direzione:RIGHT per una corsia orizzontale}], "
+           "blocchi:[{id, testo:'Titolo|riga 2', tipo:step|dec|ok|prop|ai|store|actor, descrizione:'2-3 frasi', trasversale:true se lo usano quasi tutti, esterno:true per un sistema fuori dal codice (niente ancore), "
+           "ancore:['file.py' o 'file.py:Classe.metodo'], fisso:true se l'utente l'ha scelto (non cambiarlo), interno:{titolo, gruppi:[...], "
+           "nodi:[{id, testo, tipo, descrizione, ancore}], archi:[[da, a, 'etichetta', 'descrizione']]}}], archi:[[da, a, 'etichetta', 'descrizione']]}. "
+           "Id unici, senza / e >. Descrizioni, icone e gruppi servono a rendere lo schema chiaro: descrivi solo cio' che il codice fa davvero (leggi docstring e funzioni), non inventare.")
+
+
+def prompt_modello(spec_path, root):
+    return (f"Costruisci o aggiorna il modello concettuale del progetto in {root} scrivendo la spec JSON {spec_path}. {FORMATO} "
+            "I blocchi sono i concetti del dominio (non i file), ognuno con almeno un'ancora vera; i sotto-concetti stanno in «interno». "
+            "Ogni funzione del progetto deve cadere in un blocco, salvo codice di test o infrastruttura elencato in «infrastruttura». "
+            "Una freccia e' ammessa solo se il codice ha una chiamata o un import tra le ancore dei due estremi. "
+            f"Verifica con: python \"{os.path.abspath(__file__)}\" \"{spec_path}\" --root \"{root}\" --check, e ripeti finche' esce con codice 0. "
+            "Non modificare il codice del progetto, solo la spec.")
+
+
+def sids_di(r, t):
+    """Simboli reali di un bersaglio di nota: blocco, nodo interno o freccia (unione dei due estremi)."""
+    if ">" not in t: return r["sids"].get(t, [])
+    pre, _, ab = t.rpartition("/"); pre = pre + "/" if pre else ""
+    return [s for x in ab.split(">") for s in r["sids"].get(pre + x, [])]
+
+
+def prompt_note(note, E, r, nota_file=None):
+    """E, r = None se la spec non ha ancore: le note vanno comunque, senza i simboli di codice."""
+    righe = []
+    for n in note:
+        sim = ", ".join(f"{s} (line {E['sim'][s]['riga']})" for s in sids_di(r, n["target"])[:15]) if E else ""
+        righe.append(f"- NOTE {n['id']} on «{n['titolo']}», code: {sim or 'n/a'}\n  {n['nota']}")
+    fine = (f"\nThen update {nota_file}: for each note set its state to «fatta» and write in «risposta» what you did (or the answer to the question)."
+            if nota_file else "\nFinish with a short summary: for each note, what you changed or the answer to it.")
+    return ("The user left these notes on a diagram of the project. Apply them to the code with the minimum change needed; "
+            "if a note is only a question, answer it without changing anything. Touch nothing else.\n" + "\n".join(righe) + fine)
+
+
+VENDOR = {"cytoscape.min.js", "elk.bundled.js", "cytoscape-node-html-label.min.js"}  # librerie del disegno, servite da vendor/ (niente CDN)
+SKIP = {"node_modules", "__pycache__", "venv", "site-packages", "dist", "build"}
+
+
+EXTS = (".py",)  # file extensions that count as code (see --code-ext)
+
+
+def file_py(root):
+    """{percorso relativo: mtime} dei .py del progetto: e' anche l'impronta per accorgersi che il codice e' cambiato."""
+    out = {}
+    for dp, dn, fn in os.walk(root):
+        dn[:] = [d for d in dn if d not in SKIP and not d.startswith(".")]
+        for f in fn:
+            if f.endswith(EXTS):
+                p = os.path.join(dp, f)
+                try: out[os.path.relpath(p, root).replace(os.sep, "/")] = os.stat(p).st_mtime
+                except OSError: pass
+    return out
+
+
+def estrai(root, files=None):
+    """Base di verita' deterministica, solo da ast: simboli (funzioni, classi, metodi) con riga e hash, chiamate, import.
+    ponytail: le chiamate si risolvono per nome (sovrastima se due funzioni si chiamano uguale), gli import solo
+    da radice del progetto; passare a una risoluzione per scope e per pacchetto se serve piu' precisione."""
+    files = files if files is not None else file_py(root)
+    sim, chiam, imp, flusso = {}, {}, {}, set()
+    # "usa" = chiama oppure nomina (es. passa la funzione come argomento: graph.add_node("x", node_x))
+    chiamate = lambda nodi: ({c.func.id if isinstance(c.func, ast.Name) else c.func.attr for n in nodi for c in ast.walk(n)
+                              if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute))}
+                             | {c.id for n in nodi for c in ast.walk(n) if isinstance(c, ast.Name) and isinstance(c.ctx, ast.Load)})
+    def a_file(parti):
+        for c in ("/".join(parti) + ".py", "/".join(parti + ["__init__"]) + ".py"):
+            if c in files: return c
+    for rel in files:
+        if not rel.endswith(".py"):  # Terraform, YAML, shell…: one symbol for the whole file is enough for anchors and drift
+            try: src = open(os.path.join(root, rel), encoding="utf-8-sig", errors="replace").read()
+            except OSError: continue
+            sim[f"{rel}:<modulo>"] = {"file": rel, "riga": 1, "hash": hashlib.sha1(src.encode()).hexdigest()[:12]}; chiam[f"{rel}:<modulo>"] = set(); imp[rel] = set(); continue
+        try: src = open(os.path.join(root, rel), encoding="utf-8-sig").read(); tree = ast.parse(src)
+        except (OSError, SyntaxError, ValueError): continue
+        righe = src.splitlines()
+        def visita(nodi, pre):
+            for n in nodi:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    sid = f"{rel}:{pre}{n.name}"
+                    sim[sid] = {"file": rel, "riga": n.lineno, "hash": hashlib.sha1("\n".join(righe[n.lineno - 1:n.end_lineno]).encode()).hexdigest()[:12]}
+                    if isinstance(n, ast.ClassDef): visita(n.body, f"{pre}{n.name}.")
+                    else: chiam[sid] = chiamate(n.body)
+        visita(tree.body, "")
+        # le istruzioni fuori da ogni funzione (es. app = FastAPI()) stanno in un simbolo <modulo>
+        sim[f"{rel}:<modulo>"] = {"file": rel, "riga": 1, "hash": hashlib.sha1(src.encode()).hexdigest()[:12]}
+        chiam[f"{rel}:<modulo>"] = chiamate([n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))])
+        dest, pkg = set(), rel.split("/")[:-1]
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import): basi = [(a.name.split("."), []) for a in n.names]
+            elif isinstance(n, ast.ImportFrom):
+                base = (pkg[:len(pkg) - (n.level - 1)] if n.level else []) + (n.module.split(".") if n.module else [])
+                basi = [(base, [a.name]) for a in n.names] if n.names else []
+            else: continue
+            for base, nomi in basi:
+                for p in [base] + [base + [x] for x in nomi]:
+                    f = a_file(p) if p else None
+                    if f and f != rel: dest.add(f)
+        imp[rel] = dest
+        # adattatore LangGraph: add_node/add_edge/add_conditional_edges dichiarano un flusso tra funzioni che non e' una chiamata
+        s = lambda x: x.value if isinstance(x, ast.Constant) and isinstance(x.value, str) else None
+        nomi, coppie = {}, []
+        for c in ast.walk(tree):
+            if not (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)): continue
+            a = c.args
+            if c.func.attr == "add_node" and len(a) == 2 and s(a[0]):  # add_node("x", f) o add_node("x", wrapper("x", f))
+                fn = [m.id for m in ast.walk(a[1]) if isinstance(m, ast.Name)]
+                if fn: nomi[s(a[0])] = fn[-1]
+            elif c.func.attr == "add_edge" and len(a) == 2: coppie.append((s(a[0]), s(a[1])))
+            elif c.func.attr == "add_conditional_edges" and len(a) >= 3 and isinstance(a[2], ast.Dict): coppie += [(s(a[0]), s(v)) for v in a[2].values]
+        flusso |= {(nomi[x], nomi[y]) for x, y in coppie if x in nomi and y in nomi}
+    return {"sim": sim, "chiam": chiam, "imp": imp, "files": files, "flusso": flusso}
+
+
+def risolvi(a, E):
+    """Ancora 'file' o 'file:Classe.metodo' -> simboli reali. Per una classe, anche i suoi metodi."""
+    f, _, q = a.partition(":")
+    if not q: return [s for s, v in E["sim"].items() if v["file"] == f]
+    return [s for s in E["sim"] if s == a or s.startswith(a + ".")]
+
+
+def prova(E, sa, sb):
+    """Perche' c'e' una freccia da A a B? Ritorna (testo, etichetta breve) o None. Prove ammesse: A usa (chiama o nomina)
+    un simbolo di B, A importa un file di B, oppure il grafo (LangGraph add_edge) collega le loro funzioni."""
+    nome = lambda s: s.rpartition(":")[2].rpartition(".")[2]
+    nomi, fb = {nome(s) for s in sb}, {E["sim"][s]["file"] for s in sb}
+    usati = sorted(set().union(*(E["chiam"].get(s, set()) for s in sa)) & nomi) if sa else []
+    if usati: return "usa " + ", ".join(usati[:3]), usati[0]
+    imp = sorted({f for s in sa for f in E["imp"].get(E["sim"][s]["file"], set())} & fb)
+    if imp: return "importa " + ", ".join(imp[:3]), "importa"
+    fl = sorted({f"{nome(a)} → {n}" for a in sa for n in nomi if (nome(a), n) in E["flusso"]})
+    if fl: return "grafo: " + ", ".join(fl[:3]), fl[0]
+
+
+def ancore_blocco(b):
+    return list(b.get("ancore", [])) + [a for n in (b.get("interno") or {}).get("nodi", []) for a in n.get("ancore", [])]
+
+
+def controlla(spec, E, sigilli=None):
+    """Verifica la spec contro il codice. Ritorna {"stati": {id: {stato, rotte}}, "archi": {id: testo della prova, '' se manca},
+    "usato": {id trasversale: [chi lo usa]}, "copertura": {tot, coperti, scoperti}}. Stato: ok | rotto (ancora che non esiste
+    o mancante) | da riverificare (il codice sotto l'ancora e' cambiato dall'ultima --sigilla)."""
+    def stato(ancore):
+        rot = [a for a in ancore if not risolvi(a, E)] or (["(nessuna ancora)"] if not ancore else [])
+        sids = {s for a in ancore for s in risolvi(a, E)}
+        giallo = bool(sigilli) and any(sigilli.get(s) not in (None, E["sim"][s]["hash"]) for s in sids)
+        return {"stato": "rotto" if rot else "da riverificare" if giallo else "ok", "rotte": rot}, sids
+    testo = lambda sa, sb: (prova(E, sa, sb) or ("",))[0]
+    stati, archi, sids, usati = {}, {}, {}, set()
+    def livello(pre, nodi, ar):  # inner steps have no anchors of their own: they take the state of their block, and their arrows are not checked
+        for n in nodi: stati[pre + n["id"]], sids[pre + n["id"]] = stati[pre[:-1]], set()
+    ext = {b["id"] for b in spec["blocchi"] if b.get("esterno")}  # sistemi fuori dal codice (sito, servizi): dichiarati, non verificabili
+    for b in spec["blocchi"]:
+        stati[b["id"]], sids[b["id"]] = ({"stato": "ok", "rotte": []}, set()) if b["id"] in ext else stato(ancore_blocco(b)); usati |= sids[b["id"]]
+    for a, b, *rest in spec.get("archi", []):
+        ev = rest[2] if len(rest) > 2 else ""  # optional 5th item: the evidence the extractor found (a graph call, a path mention, shared identifiers)
+        archi[f"{a}>{b}"] = "relazione dichiarata con un sistema esterno (non verificabile nel codice)" if {a, b} & ext else ev or testo(sids[a], sids[b])
+    for b in spec["blocchi"]:
+        if b.get("interno"): livello(b["id"] + "/", b["interno"]["nodi"], b["interno"].get("archi", []))
+    usato = {b["id"]: [x["id"] for x in spec["blocchi"] if x["id"] != b["id"] and prova(E, sids[x["id"]], sids[b["id"]])]
+             for b in spec["blocchi"] if b.get("trasversale")}
+    esterni = {}  # per ogni nodo interno senza frecce interne: le sue relazioni vere (max 3) con altri blocchi, cosi' si capisce cos'e'
+    for b in spec["blocchi"]:
+        if not b.get("interno"): continue
+        conn = {x for a, c, *_ in b["interno"].get("archi", []) for x in (a, c)}
+        for n in b["interno"]["nodi"]:
+            if n["id"] in conn: continue
+            s, rel = sids[f"{b['id']}/{n['id']}"], []
+            for x in spec["blocchi"]:
+                if x["id"] == b["id"] or x.get("trasversale"): continue
+                info = {"altro": x["id"], "titolo": x["testo"].split("|")[0], "d": x.get("descrizione", ""), "da": n["id"]}
+                o, i = prova(E, s, sids[x["id"]]), prova(E, sids[x["id"]], s)
+                if o: rel.append({**info, "dir": "out", "et": o[1], "pr": o[0]})
+                if i: rel.append({**info, "dir": "in", "et": i[1], "pr": i[0]})
+            esterni.setdefault(b["id"], []).extend(rel[:3])
+    infra = tuple(spec.get("infrastruttura", []))
+    tutti = [s for s in E["sim"] if not s.endswith(":<modulo>") and not E["sim"][s]["file"].startswith(infra)]
+    scoperti = [s for s in tutti if s not in usati]
+    return {"stati": stati, "archi": archi, "usato": usato, "esterni": esterni, "sids": {k: sorted(v) for k, v in sids.items()},
+            "copertura": {"tot": len(tutti), "coperti": len(tutti) - len(scoperti), "scoperti": scoperti}}
+
+
+def costruisci(spec, ver=None, posiz=None):
+    posiz = posiz or {}
+    blocchi = [{**b, "codice": b.get("codice") or ", ".join(ancore_blocco(b))[:400]} for b in spec["blocchi"]]
+    vt, meta = vista("", spec.get("titolo", "Pipeline"), blocchi, spec.get("archi", []), ver, posiz.get(""), spec.get("gruppi"))
+    det = {}
+    for b in spec["blocchi"]:
+        i = b.get("interno")
+        if i:
+            v, m2 = vista(b["id"], i.get("titolo") or b["testo"].split("|")[0], i["nodi"], i.get("archi", []), ver, posiz.get(b["id"]), i.get("gruppi"), (ver or {}).get("esterni", {}).get(b["id"]))
+            det[b["id"]] = {"titolo": b["testo"].split("|")[0], "vista": v}; meta.update(m2)
+    return {"titolo": spec.get("titolo", "Pipeline"), "vista": vt, "meta": meta, "dettagli": det,
+            "copertura": ver["copertura"] if ver else None}
+
+
+PAGE = r"""<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Pipeline</title>
+<style>
+:root{color-scheme:light;--bg:#f6f6f3;--pa:#ffffff;--fg:#0b0c0f;--mu:#5d636c;--b:#0b0c0f1c;--ac:#4d7c0f;--pb:#0b0c0f;--pf:#e8ff5a;--c-step:#ffffff;--s-step:#2563eb;--c-dec:#fffbeb;--s-dec:#b45309;--c-ok:#f0fdf4;--s-ok:#15803d;--c-prop:#fff7ed;--s-prop:#c2410c;--c-ai:#ecfeff;--s-ai:#0e7490;--c-store:#f4f4f5;--s-store:#52525b;--c-actor:#ffffff;--nb:#fdf6b2;--nf:#3d3814}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){color-scheme:dark;--bg:#0b0c0f;--pa:#101216;--fg:#f5f6f8;--mu:#8a9099;--b:#ffffff17;--ac:#e8ff5a;--pb:#e8ff5a;--pf:#0b0c0f;--c-step:#131823;--s-step:#6ea8ff;--c-dec:#1f1a0e;--s-dec:#e0b84a;--c-ok:#0f1d15;--s-ok:#5fd18b;--c-prop:#211509;--s-prop:#ffa35a;--c-ai:#0c1d24;--s-ai:#5ad1ff;--c-store:#15171b;--s-store:#8a9099;--c-actor:#0b0c0f;--nb:#e8ff5a;--nf:#0b0c0f}}
+:root[data-theme=dark]{color-scheme:dark;--bg:#0b0c0f;--pa:#101216;--fg:#f5f6f8;--mu:#8a9099;--b:#ffffff17;--ac:#e8ff5a;--pb:#e8ff5a;--pf:#0b0c0f;--c-step:#131823;--s-step:#6ea8ff;--c-dec:#1f1a0e;--s-dec:#e0b84a;--c-ok:#0f1d15;--s-ok:#5fd18b;--c-prop:#211509;--s-prop:#ffa35a;--c-ai:#0c1d24;--s-ai:#5ad1ff;--c-store:#15171b;--s-store:#8a9099;--c-actor:#0b0c0f;--nb:#e8ff5a;--nf:#0b0c0f}
+:root[data-theme=light]{color-scheme:light;--bg:#f6f6f3;--pa:#ffffff;--fg:#0b0c0f;--mu:#5d636c;--b:#0b0c0f1c;--ac:#4d7c0f;--pb:#0b0c0f;--pf:#e8ff5a;--c-step:#ffffff;--s-step:#2563eb;--c-dec:#fffbeb;--s-dec:#b45309;--c-ok:#f0fdf4;--s-ok:#15803d;--c-prop:#fff7ed;--s-prop:#c2410c;--c-ai:#ecfeff;--s-ai:#0e7490;--c-store:#f4f4f5;--s-store:#52525b;--c-actor:#ffffff;--nb:#fdf6b2;--nf:#3d3814}
+html,body{height:100%}body{font:15px/1.5 Inter,system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;overflow:hidden}
+h1{font-size:1.2rem;margin:0 0 .25rem}.m{color:var(--mu);font-size:.9rem}.nota{color:var(--mu);font-size:.85rem}
+button,input,select{font:inherit;font-size:.9rem;padding:.3rem .7rem;border:1px solid var(--b);background:none;color:var(--fg);border-radius:6px}button{cursor:pointer}
+button.p{background:var(--pb);color:var(--pf);border-color:var(--pb);font-weight:600}input{flex:1;min-width:0}
+#pl{position:fixed;inset:0;overflow:hidden;background-image:radial-gradient(var(--b) 1.2px,transparent 1.2px);background-size:24px 24px}
+.ah{display:flex;align-items:center;justify-content:center;text-align:center;box-sizing:border-box;padding:6px 10px;font-family:system-ui,sans-serif;line-height:1.3;overflow:hidden;opacity:.93;white-space:pre-wrap}
+.ah.rect{border-radius:12px}.ah.ellipse{border-radius:50%}.ah.diamond{clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
+.ah.triangle{clip-path:polygon(50% 0,100% 100%,0 100%);align-items:flex-end;padding-bottom:6px}
+.ah.star{clip-path:polygon(50% 0,61% 35%,98% 35%,68% 57%,79% 91%,50% 70%,21% 91%,32% 57%,2% 35%,39% 35%)}.ah.hexagon{clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)}
+.ah.text{clip-path:polygon(0 0,calc(100% - 16px) 0,100% 16px,100% 100%,0 100%);text-align:left;justify-content:flex-start;align-items:flex-start;padding:8px 22px 8px 10px;font-size:13px!important}
+.ah.emoji{background:none!important;padding:0}
+#nf{position:fixed;top:4.4rem;left:0;right:0;margin:0 auto;width:min(28rem,calc(100vw - 2rem));display:flex;flex-direction:column;gap:.5rem;z-index:20}
+#nf .tc{background:var(--bg);border:2px solid var(--s-prop);border-radius:10px;padding:.7rem;box-shadow:0 4px 24px #0006;animation:pop .3s ease both,glow 1.8s ease-in-out .3s infinite}#nf pre{white-space:pre-wrap;max-height:10rem;overflow:auto;font-size:.8rem;margin:.4rem 0}
+#tb button.on{background:var(--pb);color:var(--pf)}
+#tb{display:flex;flex-direction:column;gap:4px}#tb button{width:34px;padding:.2rem 0}
+#ep{position:absolute;left:48px;bottom:0;display:grid;grid-template-columns:repeat(6,1fr);gap:2px;background:var(--bg);border:1px solid var(--b);border-radius:8px;padding:4px}#ep button{font-size:1.1rem}
+.u{width:300px;box-sizing:border-box;border-radius:12px;background:var(--cc);border:1.5px solid var(--cs);padding:8px 13px 8px;color:var(--fg);box-shadow:0 1px 4px #0002;font:12px/1.4 system-ui,sans-serif;overflow:hidden}
+.u i{display:block;font-size:10.5px;letter-spacing:.03em;color:var(--cs)}.u b{display:block;font-size:14.5px;font-weight:700;margin:1px 0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.u s{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-decoration:none;font-size:10.5px;line-height:1.3;color:var(--mu);margin:-2px 0 5px}
+.u p{margin:0;padding-top:5px;border-top:1px solid var(--cs);font-size:12px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+.u.step{--cc:var(--c-step);--cs:var(--s-step)}.u.dec{--cc:var(--c-dec);--cs:var(--s-dec)}.u.ok{--cc:var(--c-ok);--cs:var(--s-ok)}.u.prop{--cc:var(--c-prop);--cs:var(--s-prop)}
+.u.ai{--cc:var(--c-ai);--cs:var(--s-ai)}.u.store{--cc:var(--c-store);--cs:var(--s-store)}.u.actor{--cc:var(--c-prop);--cs:var(--s-prop)}.u.auto{border-style:dashed}
+.u.L-blu{--cc:var(--c-step);--cs:var(--s-step)}.u.L-verde{--cc:var(--c-ok);--cs:var(--s-ok)}.u.L-viola{--cc:var(--c-ai);--cs:var(--s-ai)}
+.u.L-arancio{--cc:var(--c-prop);--cs:var(--s-prop)}.u.L-giallo{--cc:var(--c-dec);--cs:var(--s-dec)}.u.L-grigio{--cc:var(--c-store);--cs:var(--s-store)}
+.zmid .u p{display:none}.zfar .u p,.zfar .u s,.zfar .u i{display:none}.zfar .u{display:flex;flex-direction:column;justify-content:center}.zfar .u b{font-size:22px;margin:0}  /* semantic zoom */
+#ft{bottom:.75rem;left:50%;transform:translateX(-50%);display:flex;gap:.35rem;padding:.3rem .45rem;font-size:.8rem;max-width:calc(100vw - 22rem);flex-wrap:wrap;justify-content:center}
+#ft button{padding:.15rem .55rem;border-radius:99px;font-size:.8rem}#ft button:not(.on){opacity:.45;text-decoration:line-through}
+.u.ext{background:transparent;border:1.5px dashed var(--mu);box-shadow:none;--cs:var(--mu)}.u.ext p{-webkit-line-clamp:2}
+.nt{width:250px;box-sizing:border-box;padding:8px 22px 8px 10px;background:var(--nb);color:var(--nf);font:12px/1.4 system-ui,sans-serif;overflow:hidden;
+ clip-path:polygon(0 0,calc(100% - 18px) 0,100% 18px,100% 100%,0 100%)}
+#sel{left:0;right:0;margin:0 auto;bottom:1rem;width:min(44rem,calc(100vw - 2rem));padding:.7rem;z-index:12;max-height:60vh;overflow:auto}
+.az{display:flex;gap:.5rem;margin-top:.4rem}.row{padding:.6rem 0;border-top:1px solid var(--b)}
+.t{display:inline-block;font-size:.75rem;padding:.05rem .45rem;border:1px solid currentColor;border-radius:99px;margin-right:.5rem}.fatta{color:var(--s-ok)}.aperta{color:var(--s-prop)}.lav{color:var(--ac)}.rosso{color:#d32f2f}.grigio{opacity:.7}
+.lg::before{content:'';display:inline-block;width:11px;height:11px;border-radius:3px;background:var(--k);margin-right:5px;vertical-align:-1px}
+[hidden]{display:none!important}
+/* ---- islands: the canvas is the whole screen, every other piece floats over it, anchored to an edge */
+.isl{position:fixed;z-index:10;background:color-mix(in srgb,var(--bg) 86%,transparent);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid var(--b);border-radius:12px;box-shadow:0 6px 24px #0004;animation:pop .3s ease both}
+#ti{top:.75rem;left:.75rem;padding:.4rem .9rem}#ti h1{font-size:1.05rem;margin:0}#ti .m{font-size:.8rem;line-height:1.2}
+#ab{top:.75rem;left:0;right:0;margin:0 auto;width:fit-content;max-width:calc(100vw - 30rem);display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;padding:.35rem}
+#ab button{border-color:transparent}#ab button:hover{border-color:var(--b)}#ab button.p{border-color:var(--fg)}#ab .nota{padding:0 .4rem;max-width:22rem}
+#zm{bottom:.75rem;right:.75rem;display:flex;gap:4px;padding:.25rem}#zm button{border-color:transparent}
+#tb{left:.75rem;top:0;bottom:0;margin:auto 0;height:fit-content;padding:.3rem}#tb button{border-color:transparent}
+#lgd{bottom:.75rem;left:.75rem;padding:.3rem .8rem;max-width:min(38rem,calc(100vw - 9rem));font-size:.85rem}#lgd summary{cursor:pointer;color:var(--mu)}
+#lgd .lgc{display:flex;gap:.5rem .9rem;flex-wrap:wrap;align-items:center;margin-top:.4rem;max-height:40vh;overflow:auto}
+#dock{top:4.2rem;right:.75rem;width:min(25rem,calc(100vw - 1.5rem));max-height:calc(100vh - 8.2rem);display:flex;flex-direction:column;overflow:hidden}
+#dt{display:flex;gap:.2rem;padding:.35rem;align-items:center}#dt button{border-color:transparent;border-radius:8px}#dt button.on{background:var(--pb);color:var(--pf)}#dt #dk{margin-left:auto}
+#dt .dot{display:none}#dt button.alive .dot{display:inline-block;width:.5rem;height:.5rem;border-radius:50%;background:var(--ac);margin-left:.35rem;animation:pulse 1.2s ease-in-out infinite}
+#nc{font-weight:600;display:inline-block}#nc.pop{animation:bump .45s ease}
+#dbody{overflow:auto;padding:0 .8rem .8rem}#dock h2{font-size:.95rem!important;margin:.2rem 0 .4rem!important}
+/* ---- loading */
+@keyframes pop{from{opacity:0;transform:translateY(-6px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(340%)}}
+@keyframes pulse{50%{opacity:.3}}
+@keyframes bump{40%{transform:scale(1.6)}}
+@keyframes glow{50%{box-shadow:0 0 0 5px #d9731a55}}
+#ld{position:fixed;top:0;left:0;right:0;height:3px;z-index:30;overflow:hidden;opacity:0;transition:opacity .25s;pointer-events:none}#ld.on{opacity:1}
+#ld::before{content:"";position:absolute;top:0;bottom:0;left:0;width:30%;background:linear-gradient(90deg,transparent,var(--ac),transparent);animation:slide 1.1s ease-in-out infinite}
+#ld.wait::before{background:linear-gradient(90deg,transparent,var(--s-prop),transparent);animation-duration:2.4s}
+.sp{display:inline-block;width:1em;height:1em;border:2px solid var(--b);border-top-color:var(--ac);border-radius:50%;animation:spin .8s linear infinite}.sp.big{width:2.2rem;height:2.2rem;border-width:3px}
+#boot{position:fixed;inset:0;display:flex;flex-direction:column;gap:.8rem;align-items:center;justify-content:center;color:var(--mu);pointer-events:none;z-index:5}
+.spinning:not(:empty)::before,button.busy::before{content:"";display:inline-block;width:.8em;height:.8em;margin-right:.5em;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-.1em}
+/* ---- direction C: top bar, rail, canvas, inspector, command bar */
+:root{--top:52px;--side:380px;--rail:52px}
+button,input,select{border-radius:6px}
+.isl{background:var(--pa);border-radius:8px}
+#top{position:fixed;top:0;left:0;right:0;height:var(--top);display:flex;align-items:center;gap:.75rem;padding:0 .75rem;background:var(--pa);border-bottom:1px solid var(--b);z-index:15}
+#ti{display:flex;align-items:center;gap:.6rem;min-width:0}#ti .lo{flex:none;width:26px;height:26px;border-radius:6px;background:var(--pb);color:var(--pf);display:grid;place-items:center;font-weight:800;font-size:13px}
+#ti h1{font-size:.95rem;margin:0;white-space:nowrap}#ti .m{font-size:.78rem;line-height:1.2}#ti .m button{padding:0 .3rem;font-size:.78rem}
+#ab{margin-left:auto;display:flex;gap:.3rem;align-items:center;min-width:0}#ab button{border-color:transparent;color:var(--mu)}#ab button:hover{color:var(--fg);border-color:var(--b)}
+#ab .nota{max-width:22rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#th{width:34px;padding:.25rem 0;border-color:var(--b)}
+#pl{top:var(--top);left:var(--rail);right:var(--side);background-color:var(--bg)}
+#tb{position:fixed;top:var(--top);left:0;bottom:0;width:var(--rail);margin:0;height:auto;border-radius:0;border-width:0 1px 0 0;box-shadow:none;align-items:center;padding:.6rem 0;animation:none}
+#ins{position:fixed;top:var(--top);right:0;bottom:0;width:var(--side);background:var(--pa);border-left:1px solid var(--b);overflow:auto;z-index:12;display:flex;flex-direction:column}
+#sel,#dock{position:static!important;inset:auto!important;width:auto!important;max-height:none!important;margin:0!important;border:0;border-radius:0;box-shadow:none;background:none;-webkit-backdrop-filter:none;backdrop-filter:none;animation:none}
+#sel{padding:1rem 1.1rem;border-bottom:1px solid var(--b)}#st{font-size:1.05rem}#sel .az{flex-wrap:wrap}
+#emp{padding:1rem 1.1rem;border-bottom:1px solid var(--b)}#sel:not([hidden])+#emp{display:none}
+#dock{display:flex;flex-direction:column;overflow:visible}#dt{padding:.6rem .8rem 0;border-bottom:1px solid var(--b)}#dt #dk{display:none}
+#dbody{overflow:visible;padding:0 1.1rem 1rem}
+#cmd{position:fixed;bottom:1rem;left:calc(var(--rail) + (100vw - var(--rail) - var(--side)) / 2);transform:translateX(-50%);width:min(40rem,calc(100vw - var(--rail) - var(--side) - 2rem));
+ display:flex;gap:.45rem;align-items:center;padding:.4rem .45rem .4rem .7rem;background:var(--pa);border:1px solid var(--b);border-radius:10px;box-shadow:0 14px 40px #0005;z-index:11}
+#cmd kbd{font:600 .7rem ui-monospace,monospace;padding:.1rem .35rem;border:1px solid var(--b);border-radius:4px;color:var(--mu);white-space:nowrap}
+#cmd input{border:0;background:none;outline:none;font-size:.95rem;padding:.35rem .2rem}
+#zm{right:calc(var(--side) + .75rem)}#lgd{left:calc(var(--rail) + .75rem);bottom:4.6rem}#ft{left:calc(var(--rail) + (100vw - var(--rail) - var(--side)) / 2);bottom:4.6rem}
+#nf{top:calc(var(--top) + .75rem);left:auto;right:calc(var(--side) + .75rem);margin:0;width:min(26rem,calc(100vw - 2rem))}
+#boot{left:var(--rail);right:var(--side);top:var(--top)}#ld{top:var(--top)}
+.u{border-radius:6px;font-family:Inter,system-ui,sans-serif}.u i{text-transform:uppercase;font-style:normal;font-weight:600;letter-spacing:.06em;font-size:10px}
+@media(max-width:1100px){:root{--side:300px}}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;transition:none!important}}
+</style>
+<div id="ld" aria-hidden="true"></div>
+<div id="boot"><div class="sp big"></div><div>Building the blueprint…</div></div>
+<div id="pl"></div><div id="cv" hidden></div>
+<div id="nf" role="alert"></div>
+<header id="top"><div id="ti"><span class="lo">B</span><div><h1 id="tt">Pipeline</h1><div id="bc" class="m"></div></div></div>
+<div id="ab"><button id="cp" title="Copy a prompt for Claude with the open notes">Copy prompt</button><button id="cm" title="Copy a prompt that rebuilds the model">Rebuild model</button><button id="rl">Auto-arrange</button><button id="rf" hidden>Refresh</button><span id="rs" class="nota"></span><span id="cs" class="nota"></span><button id="th" title="Switch light / dark theme" aria-label="Switch theme">◐</button></div></header>
+<div id="cmd"><kbd>Ctrl K</kbd><input id="ci" placeholder="Describe a change to the selected block…" aria-label="Note on the selected block"><button id="pn" hidden title="Turn the open notes into an architecture plan (Shift+P)">Plan changes</button><button id="ru" class="p" hidden title="Run the open notes directly (Shift+R)">Run notes</button></div>
+<div id="tb" class="isl"><button data-t="select" class="on" title="Select (V)" aria-label="Select">↖</button><button data-t="hand" title="Hand: pan (H, or hold Space)" aria-label="Hand">✋</button><button data-t="rect" title="Rectangle (R)" aria-label="Rectangle">▭</button><button data-t="ellipse" title="Ellipse (O)" aria-label="Ellipse">◯</button><button data-t="diamond" title="Diamond (D)" aria-label="Diamond">◇</button><button data-t="triangle" title="Triangle" aria-label="Triangle">△</button><button data-t="star" title="Star" aria-label="Star">☆</button><button data-t="hexagon" title="Hexagon" aria-label="Hexagon">⬡</button><button data-t="text" title="Text block / comment (T)" aria-label="Text block">T</button><button id="em" title="Emoji (E)" aria-label="Emoji">😀</button><div id="ep" hidden></div></div><div id="ft" class="isl" hidden></div><div id="zm" class="isl"><button id="z1" aria-label="Zoom in">+</button><button id="z2" aria-label="Zoom out">−</button><button id="z3">Fit</button></div>
+<details id="lgd" class="isl"><summary>Legend</summary><div class="lgc nota"><span class="lg" style="--k:var(--s-prop)">entry point</span><span class="lg" style="--k:var(--s-step)">step</span><span class="lg" style="--k:var(--s-ai)">LLM step</span><span class="lg" style="--k:var(--s-ok)">document</span><span class="lg" style="--k:var(--s-dec)">decision</span><span class="lg" style="--k:var(--s-store)">external or store</span>
+<span>glow = downstream of the selected block · magenta border = breaks a rule · yellow border = code changed since the last refresh · dashed red = code not found · solid border = tests of the last run (green passed · red failed · grey none or could not run) · solid arrow = flow · dashed = dependency · red dotted = no proof in the code · box = phase · yellow note = comment · double-click opens the inside · right-drag or scroll = pan · ctrl+scroll = zoom · drag = select · right click = ask</span></div></details>
+<aside id="ins"><div id="sel" class="isl" hidden><div id="st" style="font-weight:600"></div><div id="sd" style="margin-top:.2rem"></div><div id="sc" class="nota"></div>
+<div class="az"><button id="open">Open the inside of this block</button></div>
+<div class="az" id="nr"><input id="nn" placeholder="What do you want to change here?"><button class="p" id="ok">Save note</button></div>
+<div class="az" id="ar" hidden><input id="at" placeholder="Text"><input type="color" id="ac" aria-label="Color" style="flex:none;width:2.6rem;padding:.1rem"><button id="a1" aria-label="Smaller">−</button><button id="a2" aria-label="Bigger">+</button><button id="ad">Delete</button></div>
+<div class="az" id="qr" hidden><input id="qq" placeholder="Ask a question, or ask to change how this looks (color, shape, border, line…)"><select id="qm" aria-label="Model"><option>sonnet</option><option>opus</option><option>haiku</option></select><button id="qb">Ask</button></div><div id="qa" style="margin-top:.4rem;white-space:pre-wrap"></div></div>
+<div id="emp" class="nota">Select a block to see what it does, leave a note on it or ask about it. Ctrl K writes a note from the keyboard.</div>
+<div id="dock" class="isl"><div id="dt" role="tablist"><button data-p="run" id="tr" hidden>Run<i class="dot"></i></button><button data-p="notes">Notes <b id="nc">0</b></button><button data-p="rules" id="tl" hidden>Rules</button><button id="dk" aria-label="Collapse or expand the panel">▴</button></div>
+<div id="dbody" hidden><div class="dp" data-p="run"><div id="pp" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Plan</h2><div id="pt" class="nota"></div><div id="pg"></div><div class="az" id="pa" hidden><button class="p" id="pok">Approve and run</button><button id="pdc">Discard plan</button></div></div>
+<div id="rn" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Run</h2><div id="rt" class="nota"></div><div id="rg"></div><div class="az" id="ra" hidden><button class="p" id="ap">Apply selected</button><button id="dc">Discard run</button></div></div>
+</div><div class="dp" data-p="notes"><div id="nl"></div></div><div class="dp" data-p="rules"><div id="rls" hidden><h2 style="font-size:1rem;margin-top:1.5rem">Rules</h2><div class="az"><input id="ri" placeholder="Add an architecture rule in plain words, e.g. no Python file longer than 800 lines"><button class="p" id="ra2">Add rule</button><button id="rc">Check</button></div><div id="rm" class="nota"></div><div id="rr"></div></div>
+</div></div></div></aside>
+<script src="/vendor/cytoscape.min.js"></script><script src="/vendor/elk.bundled.js"></script><script src="/vendor/cytoscape-node-html-label.min.js"></script>
+<script>
+const T="__TOKEN__",$=i=>document.getElementById(i);
+const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let PL=null,sel=null,vista="",primo=true,cy=null,tok=0,apriId="";const CAMS={};  // CAMS: zoom e posizione di ogni vista, per non perderli quando si ridisegna
+const mem=(k,v)=>{try{sessionStorage.setItem(k,v)}catch(e){}};
+const sp=x=>JSON.stringify(x,(k,v)=>k=="pos"?undefined:v);  // le posizioni a mano non cambiano la struttura: niente ridisegno
+async function post(o,u="/api/nota"){return(await fetch(u,{method:"POST",body:JSON.stringify({token:T,...o})})).json()}
+function bc(){const b=$("bc");b.replaceChildren();mem("vista",vista);
+ if(!vista){b.textContent="Full diagram";return}
+ const k=el("button",null,"← Diagram");k.onclick=()=>{vista="";mostra()};
+ b.append(k,document.createTextNode("  ›  "+PL.dettagli[vista].titolo))}
+function marca(){if(!cy)return;cy.elements().removeClass("has tg tr tn tv");
+ for(const n of PL.note)for(const id of [n.target,n.target.split("/")[0]]){const x=cy.getElementById(id);if(x.length)x.addClass("has")}
+ for(const n of RV){const x=cy.getElementById(n);if(x.length)x.addClass("tv")}
+ const RK={red:3,unrunnable:2,none:1,green:0},W={};  // a node with several changed files shows the worst result
+ for(const g of PL.run&&PL.run.result?PL.run.result.groups:[])for(const n of g.nodes)if(!(n in W)||RK[g.tests.status]>RK[W[n]])W[n]=g.tests.status;
+ for(const[n,s]of Object.entries(W)){const x=cy.getElementById(n);if(x.length)x.addClass({green:"tg",red:"tr"}[s]||"tn")}}
+const STE={step:"step",dec:"decision",ok:"document",prop:"notice",ai:"LLM step",store:"external or store",actor:"entry point",ext:"external block"};
+const sn=id=>{const p=STILI[id]||{};return[p.bg&&`;background:${p.bg}`,p.fg&&`;color:${p.fg}`,p.border&&`;--cs:${p.border}`,p.borderStyle&&`;border-style:${p.borderStyle}`,p.radius!=null&&`;border-radius:${p.radius}px`].filter(Boolean).join("")};  // look overrides of a card (values validated by the server)
+const FG=c=>{const n=parseInt(c.slice(1),16);return(.299*(n>>16)+.587*(n>>8&255)+.114*(n&255))/255>.6?"#1d1f20":"#ffffff"};  // readable text on any fill
+const annHtml=d=>`<div class="ah ${d.kind}" style="width:${d.w}px;height:${d.h}px;background:${d.color};color:${d.fg};font-size:${d.kind=="emoji"?Math.min(d.w,d.h)*.8:14}px">${esc(d.text)}</div>`;
+const annEl=a=>({data:{id:"an:"+a.id,kind:a.kind,text:a.text,w:a.w,h:a.h,color:a.color,fg:FG(a.color)},classes:"an an-"+a.kind,position:{x:a.x,y:a.y}});
+const ADEF={text:{w:200,h:90,color:"#fbf3c0"},emoji:{w:56,h:56,color:"#ffffff"}},EMO=["✅","❌","⚠️","❓","💡","🔥","⭐","🚧","🔒","🐛","📌","👍","👎","❤️","🚀","🎯","📝","⏳"];
+let TOOL="select",SPACE=false,HIST=[],FUT=[],CLIP=[],lastH=0,lastSave=0,syncT=0;
+const rid=()=>Array.from({length:8},()=>"0123456789abcdef"[Math.random()*16|0]).join("");
+const placing=()=>TOOL!="select"&&TOOL!="hand",panMode=()=>TOOL=="hand"||SPACE,cursor0=()=>panMode()?"grab":TOOL=="select"?"":"crosshair";
+const panApply=()=>{$("pl").style.cursor=cursor0()};  // dragging selects with a box; a right or middle drag pans (so does a left drag in hand mode or while space is held), see the mousedown below
+function setTool(t){TOOL=t;document.querySelectorAll("#tb [data-t]").forEach(b=>b.classList.toggle("on",b.dataset.t==t));panApply()}
+const selIds=()=>cy?cy.nodes(".an:selected").map(n=>n.id().slice(3)):[];
+async function annSave(list,keep){  // the whole list goes to the server, which validates it; keep = leave the undo history alone
+ const t=Date.now();if(!keep){if(t-lastH>500){HIST.push(JSON.stringify(ANN));if(HIST.length>50)HIST.shift();FUT=[]}lastH=t}  // changes within 500ms are one undo step
+ ANN=list;lastSave=t;const j=await post({azione:"set",annot:list},"/api/annot");if(!j.annot)$("rs").textContent=j.errore||"Could not save the annotations"}
+async function annAdd(kind,text,p){if(!cy)return;const e=cy.extent(),c=p||{x:(e.x1+e.x2)/2,y:(e.y1+e.y2)/2};
+ const a={id:rid(),vista,kind,text:text||"",x:Math.round(c.x),y:Math.round(c.y),...(ADEF[kind]||{w:140,h:80,color:"#3b6fd4"})};
+ await annSave([...ANN,a]);cy.add(annEl(a));cy.elements().unselect();const x=cy.getElementById("an:"+a.id);x.select();scegliAn(x)}
+function place(p){const[k,ch]=TOOL.split(":");setTool("select");return annAdd(k,k=="text"?"Comment":ch,p)}  // one placement per tool pick, like Excalidraw
+async function annUpd(ids,f){const list=ANN.map(a=>ids.includes(a.id)?{...a,...(typeof f=="function"?f(a):f)}:a);
+ for(const a of list)if(ids.includes(a.id))cy.getElementById("an:"+a.id).data({text:a.text,color:a.color,fg:FG(a.color),w:a.w,h:a.h});await annSave(list)}
+function annSync(){if(cy)annSave(ANN.map(a=>{const n=cy.getElementById("an:"+a.id);return n.length?{...a,x:Math.round(n.position("x")),y:Math.round(n.position("y"))}:a}))}
+async function annDel(){const ids=selIds();if(!ids.length)return;await annSave(ANN.filter(a=>!ids.includes(a.id)));cy.nodes(".an:selected").remove();chiudi()}
+const annCopy=()=>{CLIP=ANN.filter(a=>selIds().includes(a.id))};
+async function annPaste(){if(!CLIP.length||!cy)return;CLIP=CLIP.map(a=>({...a,x:a.x+24,y:a.y+24}));const n=CLIP.map(a=>({...a,id:rid(),vista}));  // each paste lands 24px further
+ await annSave([...ANN,...n]);cy.add(n.map(annEl));cy.elements().unselect();n.forEach(a=>cy.getElementById("an:"+a.id).select())}
+async function annUndo(redo){const from=redo?FUT:HIST,to=redo?HIST:FUT;if(!from.length)return;to.push(JSON.stringify(ANN));await annSave(JSON.parse(from.pop()),true);await mostra()}
+function shortcuts(e){const k=e.key.toLowerCase(),m=e.ctrlKey||e.metaKey;  // true = the key was ours
+ if(m&&k=="z"){e.preventDefault();annUndo(e.shiftKey);return true}
+ if(m&&k=="y"){e.preventDefault();annUndo(true);return true}
+ if(m&&k=="c"){annCopy();return selIds().length>0}
+ if(m&&k=="v"){const had=CLIP.length>0;annPaste();return had}
+ if(m&&k=="d"){e.preventDefault();annCopy();annPaste();return true}
+ if(m)return false;
+ if(e.key==" "&&e.target.tagName!="BUTTON"){e.preventDefault();SPACE=true;panApply();return true}
+ if(e.key=="Delete"||e.key=="Backspace"){if(selIds().length){annDel();return true}return false}
+ if(e.key=="Escape"&&TOOL!="select"){setTool("select");return true}
+ const t={v:"select",h:"hand",r:"rect",o:"ellipse",d:"diamond",t:"text"}[k];if(t){setTool(t);return true}
+ if(k=="e"){$("em").click();return true}
+ return false}
+function scegliAn(x){sel=x.id();apriId="";const a=ANN.find(q=>q.id==sel.slice(3));if(!a)return;$("sel").hidden=false;$("sel").style.top="";$("sel").style.bottom="";
+ $("st").textContent="Annotation";$("sd").textContent="";$("sc").textContent="";$("qa").textContent="";["nr","qr","open"].forEach(i=>$(i).hidden=true);
+ $("ar").hidden=false;$("at").value=a.text;$("ac").value=a.color;cy.elements().removeClass("ev im dm")}
+const carta=n=>{if(n.tipo=="nota")return`<div class="nt" style="height:${n.h}px">${esc(n.sotto)}</div>`;
+ const d=n.d||n.sotto;  // la descrizione e' il contenuto del nodo: cosa fa
+ return`<div class="u ${n.tipo}${n.lc?" L-"+n.lc:""}${n.auto?" auto":""}" style="height:${n.h}px${sn(n.id)}"><i>${STE[n.tipo]||n.tipo}${n.in?` · ▸ ${n.in} inside`:""}</i><b>${esc(n.titolo)}</b>${n.sotto&&n.d?`<s>${esc(n.sotto)}</s>`:""}${d?`<p>${esc(d)}</p>`:""}</div>`};
+// layout: ELK (a livelli, con riquadri annidati); un nodo "ultimo" (usato da tutti) va nell'ultimo livello
+function elkGrafo(V){const giu=V.nodi.length>8,G={};
+ const root={id:"root",layoutOptions:{"elk.algorithm":"layered","elk.direction":giu?"DOWN":"RIGHT","elk.hierarchyHandling":"INCLUDE_CHILDREN","elk.spacing.nodeNode":"40",
+  "elk.layered.spacing.nodeNodeBetweenLayers":giu?"64":"200","elk.padding":"[top=30,left=30,bottom=30,right=30]","elk.separateConnectedComponents":"false"},children:[],edges:[]};
+ // gli spazi vanno ripetuti sui riquadri: dentro un riquadro ELK non eredita quelli della radice
+ for(const g of V.gruppi){G[g.id]={id:g.id,layoutOptions:{...root.layoutOptions,"elk.padding":"[top=46,left=26,bottom=26,right=26]"},children:[]};root.children.push(G[g.id])}
+ for(const n of V.nodi){const k={id:n.id,width:n.w,height:n.h};if(n.ultimo)k.layoutOptions={"elk.layered.layering.layerConstraint":"LAST"};else if(n.dopo)k.layoutOptions={"elk.layered.layering.layerConstraint":"LAST_SEPARATE"};(G[n.gruppo]||root).children.push(k)}
+ // le frecce di ritorno (chiudono un ciclo) vanno a ELK rovesciate: cosi' il layout segue il flusso e non rompe i cicli a modo suo; il disegno resta nel verso vero
+ root.edges=V.archi.map(e=>({id:e.id,sources:[e.da?e.b:e.a],targets:[e.da?e.a:e.b]}));return root}
+async function posiziona(V){
+ if(!V.gruppi.some(g=>g.dir))return centri(await new ELK().layout(elkGrafo(V)),0,0,{});
+ const P={},elk=new ELK();let y=30;  // le corsie non si possono lasciare a ELK gerarchico: lo si fa una corsia per volta
+ for(const nodi of [...V.gruppi.map(g=>V.nodi.filter(n=>n.gruppo===g.id)),V.nodi.filter(n=>!n.gruppo)].filter(l=>l.length)){
+  const ids=new Set(nodi.map(n=>n.id));
+  const r=await elk.layout({id:"corsia",layoutOptions:{"elk.algorithm":"layered","elk.direction":"RIGHT","elk.spacing.nodeNode":"34","elk.layered.spacing.nodeNodeBetweenLayers":"120",
+   "elk.padding":"[top=30,left=30,bottom=30,right=30]"},children:nodi.map(n=>({id:n.id,width:n.w,height:n.h})),
+   edges:V.archi.filter(e=>ids.has(e.a)&&ids.has(e.b)).map(e=>({id:e.id,sources:[e.da?e.b:e.a],targets:[e.da?e.a:e.b]}))});
+  let h=0;for(const c of r.children){P[c.id]={x:c.x+c.width/2,y:y+c.y+c.height/2};h=Math.max(h,c.y+c.height)}
+  y+=h+130}  // 130 = titolo e margini del riquadro + distanza tra le corsie
+ return P}
+const centri=(n,ox,oy,out)=>{for(const c of n.children||[]){const x=ox+c.x,y=oy+c.y;if(c.children)centri(c,x,y,out);else out[c.id]={x:x+c.width/2,y:y+c.height/2}}return out};  // i nodi sono relativi al loro riquadro; le frecce (definite alla radice) sono gia' assolute
+function stile(giu,corsie){const fg=css("--fg"),bg=css("--bg"),ac=css("--ac"),pr=css("--s-prop"),col={blu:"--s-step",verde:"--s-ok",viola:"--s-ai",arancio:"--s-prop",giallo:"--s-dec",grigio:"--s-store"};
+ return [
+  {selector:"node.card",style:{shape:"rectangle",width:e=>e.data("w")+10,height:e=>e.data("h")+10,"background-opacity":0,"border-width":0,"overlay-opacity":0}},
+  {selector:"node.gr",style:{shape:"rectangle","background-opacity":.05,"border-width":1.5,"border-opacity":.9,label:"data(label)","text-valign":"top","text-halign":"center",
+   "font-size":13,"font-weight":700,color:bg,"text-background-opacity":1,"text-background-padding":5,"text-background-shape":"rectangle","text-margin-y":-1,
+   "text-margin-x":e=>-(e.width()/2)+e.data("label").length*3.9+22,"compound-sizing-wrt-labels":"include","overlay-opacity":0,padding:28}},  // package UML: etichetta a linguetta in alto a sinistra
+  ...Object.entries(col).map(([k,v])=>({selector:"node.gr-"+k,style:{"background-color":css(v),"border-color":css(v),"text-background-color":css(v)}})),
+  {selector:"edge",style:{"curve-style":giu?"taxi":"bezier","taxi-direction":corsie?"auto":"vertical","taxi-turn":26,"taxi-turn-min-distance":12,"control-point-step-size":46,width:1.8,"line-color":fg,"line-opacity":.6,"target-arrow-shape":"vee","target-arrow-color":fg,
+   "arrow-scale":1.3,label:e=>MANY&&!e.hasClass("ev")&&!e.selected()?"":e.data("label"),"font-size":11.5,"font-weight":600,color:fg,"text-background-color":bg,"text-background-opacity":1,"text-background-padding":3,"text-background-shape":"roundrectangle","text-wrap":"ellipsis","text-max-width":150,"overlay-opacity":0}},
+  {selector:"edge.uso",style:{"line-style":"dashed","line-dash-pattern":[8,5],"line-opacity":.32,"text-opacity":.7,"target-arrow-color":fg}},  // UML: dipendenza tratteggiata, flusso continuo
+  {selector:"edge.nota",style:{"line-style":"dotted",width:1.2,"target-arrow-shape":"none",label:""}},
+  {selector:"edge.senza",style:{"line-color":"#d32f2f","target-arrow-color":"#d32f2f","line-style":"dotted","line-opacity":1}},
+  {selector:"node.card.rotto",style:{"border-width":4,"border-color":"#d32f2f","border-style":"dashed","border-opacity":1}},
+  {selector:"node.card.giallo",style:{"border-width":4,"border-color":"#e0b84a","border-opacity":1}},
+  {selector:"edge.ev",style:{"line-opacity":1,"text-opacity":1,width:2.8,"z-index":99}},
+  {selector:"edge.dm",style:{"line-opacity":.08,"text-opacity":0}},{selector:"edge.off",style:{display:"none"}},
+  {selector:"node.an",style:{shape:"rectangle",width:e=>e.data("w")+10,height:e=>e.data("h")+10,"background-opacity":0,"border-width":0,"overlay-opacity":0}},  // the look is HTML (see annHtml): above the cards
+  {selector:"node.card.im",style:{"underlay-color":pr,"underlay-opacity":.3,"underlay-padding":12}},
+  {selector:"node.card.tv",style:{"border-width":4,"border-color":"#c2185b","border-style":"dashed","border-opacity":1}},
+  {selector:"node.card.tg",style:{"border-width":4,"border-color":"#2e9d5b","border-opacity":1}},
+  {selector:"node.card.tr",style:{"border-width":4,"border-color":"#d32f2f","border-opacity":1}},
+  {selector:"node.card.tn",style:{"border-width":4,"border-color":"#8a8a8a","border-opacity":1}},
+  {selector:".has",style:{"border-width":4,"border-color":pr,"border-opacity":1,"line-color":pr,"target-arrow-color":pr}},
+  {selector:"edge.has",style:{width:3.2}},
+  {selector:":selected",style:{"border-width":4,"border-color":ac,"border-opacity":1,"line-color":ac,"target-arrow-color":ac}},
+  {selector:"edge:selected",style:{width:3.4}}]}
+async function mostra(){bset("layout",1);try{await mostra0()}finally{bset("layout",0);$("boot").hidden=true}}  // the canvas is being laid out: top bar + first-load spinner
+async function mostra0(){
+ const V=vista?PL.dettagli[vista].vista:PL.vista,mio=++tok,P=await posiziona(V);
+ if(mio!==tok)return;  // un'altra vista ha preso il posto mentre ELK calcolava
+ if(cy){cy.destroy();cy=null}$("pl").replaceChildren();
+ MANY=V.archi.length>12;const els=[...V.gruppi.map(g=>({data:{id:g.id,label:g.titolo},classes:"gr gr-"+g.colore,grabbable:false})),
+  ...V.nodi.map(n=>({data:{id:n.id,k:n.k,w:n.w,h:n.h,apri:n.apri||"",html:carta(n),...(n.gruppo?{parent:n.gruppo}:{})},classes:"card "+n.tipo+(n.stato?" "+n.stato:""),
+   position:V.pos[n.id]?{x:V.pos[n.id][0],y:V.pos[n.id][1]}:P[n.id]})),
+  ...V.archi.map(e=>({data:{id:e.id,source:e.a,target:e.b,label:e.label,ty:e.ty||""},classes:e.k+(e.senza?" senza":"")})),
+  ...ANN.filter(a=>a.vista===vista).map(annEl)];
+ cy=cytoscape({container:$("pl"),elements:els,style:stile(V.nodi.length>8||V.gruppi.some(g=>g.dir),V.gruppi.some(g=>g.dir)),layout:{name:"preset"},minZoom:.1,maxZoom:3,userZoomingEnabled:false,userPanningEnabled:false,boxSelectionEnabled:true});
+ for(const[k,s]of Object.entries(STILI)){const e=cy.getElementById(k);if(!e.length||!e.isEdge())continue;  // link looks go to Cytoscape, card looks are in the HTML
+  e.style({...(s.color&&{"line-color":s.color,"target-arrow-color":s.color}),...(s.width&&{width:s.width}),...(s.line&&{"line-style":s.line}),...(s.arrow&&{"target-arrow-shape":s.arrow})})}
+ panApply();implicite();FLT.impl=cy.edges(".uso").length>20;chips();filtri();
+ cy.nodeHtmlLabel([{query:"node.card",halign:"center",valign:"center",halignBox:"center",valignBox:"center",tpl:d=>d.html},{query:"node.an",halign:"center",valign:"center",halignBox:"center",valignBox:"center",tpl:annHtml}]);
+ const c=CAMS[vista];
+ if(c)cy.viewport({zoom:c.z,pan:c.p});
+ else{cy.fit(undefined,96);if(cy.zoom()<.7){const b=cy.elements().boundingBox(),z=.75,W=$("pl").clientWidth;  // vista d'insieme illeggibile: parti dall'inizio del flusso, leggibile ("Adatta" mostra tutto)
+  cy.zoom({level:z});cy.pan({x:(b.x2-b.x1)*z<W?W/2-(b.x1+b.x2)/2*z:96-b.x1*z,y:96-b.y1*z})}}
+ const fondo=()=>{const z=cy.zoom(),p=cy.pan(),s=$("pl").style;s.backgroundSize=`${24*z}px ${24*z}px`;s.backgroundPosition=`${p.x}px ${p.y}px`};
+ const zl=()=>{const z=cy.zoom(),c=$("pl").classList;c.toggle("zfar",z<.5);c.toggle("zmid",z>=.5&&z<.85)};zl();  // semantic zoom: less text the further away
+ fondo();cy.on("viewport",()=>{CAMS[vista]={z:cy.zoom(),p:cy.pan()};fondo();zl()});
+ cy.on("tap","node,edge",e=>placing()?place(e.position):e.target.hasClass("an")?scegliAn(e.target):scegli(e.target,e.renderedPosition.y));
+ cy.on("dragfree","node.an",()=>{clearTimeout(syncT);syncT=setTimeout(annSync,80)});  // moving one or several annotations saves once
+ cy.on("tap",e=>{if(e.target!==cy)return;if(placing())place(e.position);else chiudi()});
+ // si salva solo un nodo spostato davvero: Cytoscape emette dragfree anche per un semplice clic, e fissarlo li' lo sovrapporrebbe al layout successivo
+ cy.on("grab","node.card",e=>e.target.scratch("p0",{...e.target.position()}));
+ cy.on("dragfree","node.card",e=>{const p=e.target.position(),q=e.target.scratch("p0"),v=vista;if(!q||Math.hypot(p.x-q.x,p.y-q.y)<4)return;
+  post({azione:"sposta",vista:v,id:e.target.data("k"),x:Math.round(p.x),y:Math.round(p.y)},"/api/pos")});
+ cy.on("mouseover","node,edge",()=>$("pl").style.cursor="pointer");cy.on("mouseout","node,edge",()=>$("pl").style.cursor=cursor0());
+ sel=null;$("sel").hidden=true;marca();bc()}
+function apri(id){if(!PL.dettagli[id]||id===vista)return;vista=id;mostra()}
+function chiudi(){sel=null;$("sel").hidden=true;if(cy){cy.elements().unselect();cy.elements().removeClass("ev im dm")}}
+// scegli(..., ask): ask=true when opened with a right click, then only the Ask window shows
+function scegli(x,y,ask){sel=x.id();$("ar").hidden=true;const m=PL.meta[sel];$("sel").hidden=false;
+ cy.elements().removeClass("ev im dm");const mine=x.isNode()?x.connectedEdges():x;mine.addClass("ev");cy.edges().not(mine).addClass("dm");if(m.tipo=="nodo")x.successors().nodes(".card").addClass("im");  // blast radius: everything that runs after it  // evidenzia le frecce dell'elemento scelto
+ const s=$("sel").style;if(y>$("pl").clientHeight/2){s.top="5rem";s.bottom="auto"}else{s.top="";s.bottom=""} // il pannello non copre l'elemento cliccato
+ $("st").textContent=({nodo:"Component: ",gruppo:"Package: ",esterno:"External block: ",nota:""}[m.tipo]??"Relation: ")+m.titolo+(m.dettaglio?" · "+m.dettaglio:"");$("sd").textContent=["nodo","esterno","nota"].includes(m.tipo)?"":m.descrizione||"";
+ $("qr").hidden=!(ask&&CAPS.ask&&(m.tipo=="nodo"||m.tipo=="freccia"));$("nr").hidden=!!ask;$("qa").textContent="";$("sc").textContent=m.tipo=="nodo"?m.verifica:"";apriId=m.apri||sel;$("open").hidden=!PL.dettagli[apriId]||apriId===vista||!!ask}
+function note(){const L=$("nl"),c0=+$("nc").textContent;$("nc").textContent=PL.note.length;if(PL.note.length>c0){$("nc").classList.remove("pop");void $("nc").offsetWidth;$("nc").classList.add("pop")}  // the count bumps when a note is added
+ L.replaceChildren();if(!PL.note.length)L.append(el("p","m","No notes."));
+ for(const n of PL.note){const r=el("div","row"),st=PL.meta[n.target]?(n.stato||"aperta"):"orfana",b=el("button",null,"Delete");
+  b.onclick=async()=>{const j=await post({azione:"elimina",id:n.id});if(j.note){PL.note=j.note;marca();note()}};
+  const h=el("div");h.append(el("span","t "+(st=="fatta"?"fatta":st=="in lavorazione"?"lav":"aperta"),{aperta:"open",fatta:"done","in lavorazione":"in progress",orfana:"orphan"}[st]||st),document.createTextNode(n.titolo));
+  r.append(h,el("div","nota",n.nota));if(n.risposta)r.append(el("div",null,"→ "+n.risposta));r.append(b);b.style.marginTop=".3rem";L.append(r)}}
+function stato(r){if(!r)return;$("rf").hidden=!r.enabled;$("rf").disabled=r.running;
+ if(r.running)busy("rs","Refreshing");else idle("rs",r.ok===false?"Refresh failed: "+r.tail:r.stale?"The code changed since the last refresh":"Up to date · "+new Date(r.last*1000).toLocaleTimeString());
+ bset("refresh",r.running);$("rf").classList.toggle("busy",r.running)}
+let MANY=false,FLT={off:new Set(),impl:false};
+// edges a>b that also exist as a longer path (a>...>b) add nothing to the picture: "implied"; they can be hidden
+function filtri(){if(!cy)return;cy.edges().forEach(e=>e.toggleClass("off",FLT.off.has(e.data("ty"))||(FLT.impl&&!!e.data("imp"))))}
+function chips(){const f=$("ft"),E=cy.edges(".uso"),T={};E.forEach(e=>{const t=e.data("ty");if(t)T[t]=(T[t]||0)+1});
+ const imp=E.filter(e=>e.data("imp")).length;f.replaceChildren();f.hidden=!(Object.keys(T).length>1||imp);
+ for(const[t,n]of Object.entries(T)){const b=el("button",FLT.off.has(t)?"":"on",t+" "+n);b.onclick=()=>{FLT.off.has(t)?FLT.off.delete(t):FLT.off.add(t);chips();filtri()};f.append(b)}
+ if(imp){const b=el("button",FLT.impl?"":"on","implied links "+imp);b.title="Links already implied by a longer path";b.onclick=()=>{FLT.impl=!FLT.impl;chips();filtri()};f.append(b)}}
+function implicite(){const E=cy.edges(".uso"),out={};E.forEach(e=>(out[e.data("source")]=out[e.data("source")]||[]).push(e));
+ E.forEach(e=>{const seen=new Set([e.data("source")]),todo=[e.data("source")];let hit=false;
+  while(todo.length&&!hit){const u=todo.pop();for(const x of out[u]||[]){if(x===e)continue;const t=x.data("target");if(t===e.data("target")){hit=true;break}if(!seen.has(t)){seen.add(t);todo.push(t)}}}
+  e.data("imp",hit)})}
+let DTAB="notes",DOPEN=false,DSIG="";
+function dockShow(tab,open){if(tab)DTAB=tab;if(open!=null)DOPEN=open;
+ document.querySelectorAll("#dt [data-p]").forEach(b=>b.classList.toggle("on",DOPEN&&b.dataset.p==DTAB));
+ document.querySelectorAll("#dbody .dp").forEach(q=>q.hidden=q.dataset.p!=DTAB);$("dbody").hidden=!DOPEN;$("dk").textContent=DOPEN?"▾":"▴"}
+function dockSync(n){$("tr").hidden=!((n.run&&n.run.enabled)||(n.plan&&n.plan.enabled));$("tl").hidden=!(n.caps&&n.caps.rules);
+ const p=n.plan||{},r=n.run||{},sig=(p.running?"p":"")+(p.result&&!(r.running||r.result)?"o":"")+(r.running?"r":"")+(r.result?"x":"")+(PERMN?"!":"");
+ $("tr").classList.toggle("alive",!!sig);if(sig!==DSIG){DSIG=sig;if(sig)dockShow("run",true)}}  // something needs you in the Run tab: open it
+const BUSY={},bset=(k,v)=>{BUSY[k]=!!v;const on=Object.values(BUSY).some(Boolean);$("ld").className=on?(BUSY.perm?"on wait":"on"):""};  // top progress bar: any work in flight; amber while waiting for you
+const T0={},mmss=ms=>{const s=Math.floor(ms/1000);return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")};
+function busy(id,msg){const e=$(id);e.classList.add("spinning");T0[id]=T0[id]||Date.now();e.dataset.msg=msg;e.textContent=msg+(id=="rt"||id=="pt"?" · "+mmss(Date.now()-T0[id]):"")}
+function idle(id,msg){const e=$(id);e.classList.remove("spinning");delete T0[id];delete e.dataset.msg;e.textContent=msg||""}
+setInterval(()=>{for(const id of["rt","pt"])if(T0[id]&&$(id).dataset.msg)$(id).textContent=$(id).dataset.msg+" · "+mmss(Date.now()-T0[id])},1000);  // elapsed time of the long waits
+let PLNJ="",PERMJ="",PERMN=0;const SEEN=new Set();
+function permUi(L){L=L||[];PERMN=L.length;bset("perm",PERMN);if(PERMN&&PL&&PL.run&&PL.run.running)busy("rt","Waiting for your permission to continue");const j=JSON.stringify(L);if(j===PERMJ)return;PERMJ=j;$("nf").replaceChildren();  // one notification per pending request
+ for(const r of L){const c=el("div","tc");c.append(el("b",null,"The agent asks permission · "+r.tool),el("pre",null,r.text));
+  if(r.script)c.append(el("div","nota","The script it would run:"),el("pre",null,r.script));
+  const row=el("div","az");
+  for(const[l,d]of[["Allow once","once"],["Allow for this run","run"],["Deny","deny"]]){const b=el("button",d=="once"?"p":null,l);b.onclick=async()=>{await post({id:r.id,decision:d},"/api/perm");PERMJ="";carica()};row.append(b)}
+  c.append(row);$("nf").append(c);
+  if(!SEEN.has(r.id)){SEEN.add(r.id);if(document.hidden&&window.Notification&&Notification.permission=="granted")new Notification("Permission needed",{body:r.text.slice(0,120)})}}
+ document.title=(PERMN?`(${PERMN}) `:"")+(PL?PL.titolo:"");}
+const askNotify=()=>{if(window.Notification&&Notification.permission=="default")Notification.requestPermission()};  // needs a click: asked when you start a run
+function planUi(p,r){if(!p)return;const x=p.result,run=r&&(r.running||r.result),open=x&&!run;  // open: a plan waiting for approval
+ $("pn").hidden=!p.enabled;$("pn").disabled=p.running||!!x||!!run;if(open)$("ru").disabled=true;
+ $("pp").hidden=!(p.running||open||p.ok===false);$("pa").hidden=!open;
+ if(p.running)busy("pt","Planning: turning your notes into structural changes");else idle("pt",p.ok===false?"Planning failed: "+p.tail:open?x.summary:"");
+ bset("plan",p.running);$("pn").classList.toggle("busy",p.running);
+ const j=JSON.stringify(open?x:null);if(j===PLNJ)return;PLNJ=j;$("pg").replaceChildren();
+ if(open)for(const l of x.lines)$("pg").append(el("div",{"+":"fatta","-":"rosso"}[l[0]]||"nota",l))}
+async function planPost(o){askNotify();const j=await post(o,"/api/plan");$("rs").textContent=j.errore||"";PLNJ="";RUNJ="";await carica()}
+const TS={green:["tests passed","fatta"],red:["tests failed","rosso"],unrunnable:["tests could not run","grigio"],none:["no tests","grigio"]};
+let RUNJ="",CAPS={},RV=new Set(),STILI={},ANN=[];
+async function rules(){if(!CAPS.rules)return;const j=await(await fetch("/api/rules")).json();$("rls").hidden=false;$("rr").replaceChildren();RV=new Set();
+ if(j.errore){$("rr").textContent="Rules check failed: "+j.errore;return}
+ if(!j.rules.length)$("rr").append(el("p","m","No rules yet."));
+ for(const r of j.rules){const d=el("div","row"),bad=r.violations.length;
+  d.append(el("span","t "+(bad?"rosso":"fatta"),bad?bad+" violation"+(bad>1?"s":""):"passes"),document.createTextNode(r.text),el("div","nota","checks: "+JSON.stringify(r.check)));  // shows how the rule was understood
+  for(const v of r.violations){d.append(el("div","rosso",v.text));v.nodes.forEach(n=>RV.add(n))}
+  const b=el("button",null,"Delete");b.style.marginTop=".3rem";b.onclick=async()=>{await post({azione:"del",id:r.id},"/api/rules");rules()};d.append(b);$("rr").append(d)}
+ marca()}
+function runUi(r){if(!r)return;const x=r.result;$("ru").hidden=!r.enabled;$("ru").disabled=r.running||!!x;
+ $("rn").hidden=!(r.running||x||r.ok===false);$("ra").hidden=!x;
+ if(r.running)busy("rt","Running in an isolated copy of the repo");else idle("rt",r.ok===false?"Run failed: "+r.tail
+  :x?`Based on commit ${x.base}${x.dirty?" (uncommitted changes are not included)":""}. ${x.summary}`:"");
+ bset("run",r.running);$("ru").classList.toggle("busy",r.running);
+ const j=JSON.stringify(x||null);if(j===RUNJ)return;RUNJ=j;$("rg").replaceChildren();  // redraw only on change: keeps checkboxes and open diffs
+ if(x&&x.conformance){const c=x.conformance,a=el("div","row");  // the plan made before the code, checked against what the code became
+  a.append(el("b",null,"Plan check · "+(c.missing.length||c.unplanned.length?"differences found":"the result matches the plan")));
+  for(const[k,cls,pre]of[["done","fatta","✓ "],["missing","rosso","✗ Planned but not found: "],["unplanned","aperta","⚠ Not in the plan: "]])for(const l of c[k])a.append(el("div",cls,pre+l));$("rg").append(a)}
+ if(x&&x.arch){const a=el("div","row");a.append(el("b",null,"Architecture changes"));  // what the run changed in the blueprint, before any code diff
+  for(const l of x.arch.length?x.arch:["No architectural change: same components, flows and data contracts."])a.append(el("div",{"+":"fatta","-":"rosso","!":"rosso"}[l[0]]||"nota",l));$("rg").append(a)}
+ if(x&&x.permissions&&x.permissions.length){const a=el("div","row");a.append(el("b",null,"Permissions during the run"));  // every request the agent made, and the answer
+  for(const q of x.permissions)a.append(el("div",/denied|timed/.test(q.decision)?"rosso":"nota",q.tool+" · "+q.text.slice(0,160)+" → "+q.decision));$("rg").append(a)}
+ for(const g of x?x.groups:[]){const d=el("details","row"),s=el("summary"),c=el("input"),t=TS[g.tests.status];c.type="checkbox";c.checked=true;c.dataset.g=g.id;
+  s.append(c,document.createTextNode(" "+g.title+" · "+g.files.join(", ")+" "),el("span","t "+t[1],t[0]));
+  const pre=el("pre",null,g.diff);pre.style.cssText="white-space:pre-wrap;font-size:.75rem;max-height:20rem;overflow:auto";
+  d.append(s,el("div","nota",g.tests.detail),pre);$("rg").append(d)}}
+async function runPost(o){askNotify();const j=await post(o,"/api/run");$("rs").textContent=j.errore||"";RUNJ="";await carica();rules()}
+async function carica(){
+ const n=await(await fetch("/api/pipeline")).json();stato(n.refresh);runUi(n.run);planUi(n.plan,n.run);permUi(n.perm);dockSync(n);CAPS=n.caps||{};
+ if(n.errore){$("pl").textContent="Invalid spec: "+n.errore;return}
+ const ns=n.stili||{},cs=JSON.stringify(ns)!==JSON.stringify(STILI);STILI=ns;
+ const na=Date.now()-lastSave<2500?ANN:(n.annot||[]),ca=JSON.stringify(na)!==JSON.stringify(ANN);ANN=na;
+ const cambiato=ca||cs||!PL||!cy||sp(PL.vista)!==sp(n.vista)||sp(PL.dettagli)!==sp(n.dettagli);PL=n;$("tt").textContent=n.titolo;document.title=(PERMN?`(${PERMN}) `:"")+n.titolo;
+ const c=null;  // coverage of the whole repo is meaningless for a partial blueprint
+ $("cv").textContent=c?`Code coverage: ${c.coperti}/${c.tot} symbols in a concept`+(c.scoperti.length?` · outside the diagram: ${c.scoperti.slice(0,3).join(", ")}${c.scoperti.length>3?"…":""}`:""):"";
+ if(primo){primo=false;rules();try{const v=sessionStorage.getItem("vista");if(v&&n.dettagli[v])vista=v}catch(e){}}
+ if(!cambiato){marca();note();return}
+ if(vista&&!PL.dettagli[vista])vista="";
+ await mostra();note()}
+$("open").onclick=()=>apri(apriId);
+$("pl").oncontextmenu=e=>e.preventDefault();
+$("pl").ondblclick=e=>{if(!cy)return;const r=$("pl").getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+ const n=cy.nodes(".card").filter(n=>{const b=n.renderedBoundingBox({includeLabels:false,includeOverlays:false});return x>=b.x1&&x<=b.x2&&y>=b.y1&&y<=b.y2}).first();
+ if(n.length)apri(n.data("apri")||n.id())};
+document.addEventListener("keydown",e=>{if(["INPUT","SELECT","TEXTAREA"].includes(e.target.tagName)||shortcuts(e))return;
+ if(e.key=="Enter"&&sel&&!$("sel").hidden)apri(apriId);
+ if(e.key=="Escape"){if(!$("sel").hidden)chiudi();else if(vista){vista="";mostra()}}});
+async function salva(){const t=$("nn").value.trim();if(!sel||!t)return;
+ const j=await post({azione:"aggiungi",target:sel,nota:t});if(j.note){PL.note=j.note;$("nn").value="";marca();note()}}
+async function copia(t){try{const j=await(await fetch("/api/prompt?tipo="+t)).json();await navigator.clipboard.writeText(j.prompt);
+ $("cs").textContent=t=="note"&&!j.n?"No open notes to copy":"Copied: paste it into Claude Code"+(t=="note"?` (${j.n} notes)`:"")}
+ catch(e){$("cs").textContent="Copy failed: open the page from 127.0.0.1"}}
+document.querySelectorAll("#tb [data-t]").forEach(b=>b.onclick=()=>setTool(TOOL==b.dataset.t?"select":b.dataset.t));
+for(const c of EMO){const b=el("button",null,c);b.setAttribute("aria-label","Place "+c);b.onclick=()=>{$("ep").hidden=true;setTool("emoji:"+c)};$("ep").append(b)}
+$("em").onclick=()=>$("ep").hidden=!$("ep").hidden;
+$("at").onchange=()=>annUpd([sel.slice(3)],{text:$("at").value});$("ac").onchange=()=>annUpd(selIds(),{color:$("ac").value});
+for(const[i,f]of[["a1",.85],["a2",1.18]])$(i).onclick=()=>annUpd(selIds(),a=>({w:Math.round(a.w*f),h:Math.round(a.h*f)}));
+$("ad").onclick=annDel;
+document.addEventListener("keyup",e=>{if(e.key==" "){SPACE=false;panApply()}});
+let pd=null;  // manual pan: it works even when the drag starts on a card, which Cytoscape would grab
+$("pl").addEventListener("mousedown",e=>{if(!cy||!(panMode()&&e.button==0||e.button==1||e.button==2))return;  // right or middle drag pans anywhere
+ e.stopImmediatePropagation();e.preventDefault();pd={x:e.clientX,y:e.clientY,x0:e.clientX,y0:e.clientY,rb:e.button==2};$("pl").style.cursor="grabbing"},true);
+window.addEventListener("mousemove",e=>{if(!pd||!cy)return;cy.panBy({x:e.clientX-pd.x,y:e.clientY-pd.y});pd.x=e.clientX;pd.y=e.clientY});
+window.addEventListener("mouseup",e=>{if(!pd)return;const q=pd;pd=null;panApply();
+ if(!q.rb||Math.hypot(e.clientX-q.x0,e.clientY-q.y0)>=4)return;  // a right click that did not move: the Ask window, as before
+ const r=$("pl").getBoundingClientRect(),z=cy.zoom(),p=cy.pan(),y=e.clientY-r.top,h=cy.renderer().findNearestElement((e.clientX-r.left-p.x)/z,(y-p.y)/z,true,false);
+ if(h&&(h.isEdge()||h.hasClass("card"))){scegli(h,y,true);$("qq").focus()}});
+$("pl").addEventListener("wheel",e=>{e.preventDefault();if(!cy)return;const r=$("pl").getBoundingClientRect();  // scroll pans, ctrl/cmd+scroll (or pinch) zooms, like Figma
+ if(e.ctrlKey||e.metaKey)cy.zoom({level:cy.zoom()*Math.exp(-e.deltaY*.0015),renderedPosition:{x:e.clientX-r.left,y:e.clientY-r.top}});else cy.panBy({x:-e.deltaX,y:-e.deltaY})},{passive:false});
+const zoomBy=f=>cy&&cy.zoom({level:Math.min(3,Math.max(.1,cy.zoom()*f)),renderedPosition:{x:$("pl").clientWidth/2,y:$("pl").clientHeight/2}});
+$("z1").onclick=()=>zoomBy(1.1);$("z2").onclick=()=>zoomBy(.9);$("z3").onclick=()=>cy&&cy.fit(undefined,96);
+$("rl").onclick=async()=>{await post({azione:"reset",vista},"/api/pos");await carica();await mostra()};
+$("rf").onclick=async()=>{await post({},"/api/refresh");carica()};
+$("ra2").onclick=async()=>{const t=$("ri").value.trim();if(!t)return;$("ra2").disabled=true;$("ra2").classList.add("busy");bset("rules",1);busy("rm","Compiling the rule");
+ const j=await post({azione:"add",text:t},"/api/rules");$("ra2").disabled=false;$("ra2").classList.remove("busy");bset("rules",0);idle("rm",j.errore||"");if(!j.errore)$("ri").value="";rules()};
+$("rc").onclick=rules;
+$("qb").onclick=async()=>{const q=$("qq").value.trim(),s=sel;if(!q||!s)return;busy("qa","Thinking");$("qb").disabled=true;$("qb").classList.add("busy");bset("ask",1);
+ const j=await post({target:s,q,model:$("qm").value},"/api/ask");$("qb").disabled=false;$("qb").classList.remove("busy");bset("ask",0);idle("qa");
+ if(j.stili){STILI=j.stili;await mostra();const x=cy.getElementById(s);  // a look change redraws the view: reopen the window on the same element
+  if(x.length){scegli(x,x.isNode()?x.renderedPosition("y"):x.renderedMidpoint().y,true);$("qq").value=q}}
+ if(sel===s)$("qa").textContent=j.errore||j.answer};  // ignore the answer if the selection moved on
+$("qq").onkeydown=e=>{if(e.key=="Enter")$("qb").onclick()};
+document.querySelectorAll("#dt [data-p]").forEach(b=>b.onclick=()=>dockShow(b.dataset.p,true));$("dk").onclick=()=>dockShow(null,!DOPEN);dockShow("notes",true);
+// theme: the system decides until the user picks one, and the pick is remembered on this browser
+const thm=()=>document.documentElement.dataset.theme||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light");
+try{const t=localStorage.getItem("theme");if(t=="dark"||t=="light")document.documentElement.dataset.theme=t}catch(e){}
+$("th").textContent=thm()=="dark"?"☀":"☾";
+$("th").onclick=()=>{const t=thm()=="dark"?"light":"dark";document.documentElement.dataset.theme=t;try{localStorage.setItem("theme",t)}catch(e){}$("th").textContent=t=="dark"?"☀":"☾";if(cy)mostra()};  // the canvas reads its colors when drawn
+// command bar: Ctrl/Cmd+K writes a note on the selected block; Shift+P plans, Shift+R runs
+$("ci").onkeydown=e=>{if(e.key=="Escape"){$("ci").blur();return}if(e.key!="Enter")return;const v=$("ci").value.trim();if(!v)return;
+ if(!sel||!PL.meta[sel]){$("ci").value="";$("ci").placeholder="Select a block first, then describe the change";return}
+ $("nn").value=v;salva();$("ci").value=""};
+addEventListener("keydown",e=>{const k=e.key.toLowerCase();
+ if((e.ctrlKey||e.metaKey)&&k=="k"){e.preventDefault();$("ci").focus();return}
+ if(!e.shiftKey||e.ctrlKey||e.metaKey||e.altKey||["INPUT","SELECT","TEXTAREA"].includes(e.target.tagName))return;
+ const b=k=="p"?$("pn"):k=="r"?$("ru"):null;if(b&&!b.hidden&&!b.disabled){e.preventDefault();e.stopPropagation();b.click()}},true);  // capture: before the tool shortcuts (R = rectangle)
+$("pn").onclick=()=>planPost({azione:"start",model:$("qm").value});$("pok").onclick=()=>planPost({azione:"approve"});$("pdc").onclick=()=>planPost({azione:"discard"});
+$("ru").onclick=()=>runPost({azione:"start"});$("dc").onclick=()=>runPost({azione:"discard"});
+$("ap").onclick=()=>runPost({azione:"apply",groups:[...$("rg").querySelectorAll("input:checked")].map(c=>c.dataset.g)});
+$("cp").onclick=()=>copia("note");$("cm").onclick=()=>copia("modello");
+$("ok").onclick=salva;$("nn").onkeydown=e=>{if(e.key=="Enter")salva()};
+let boot=null;setInterval(async()=>{try{const b=(await(await fetch("/api/versione")).json()).boot;if(boot&&b!=boot)location.reload();boot=b}catch(e){}},2000);
+setInterval(()=>{if(!document.hidden)carica().catch(()=>{})},3000);
+carica();
+</script></html>"""
+
+
+def main():
+    global EXTS
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("spec", nargs="?", default="pipeline.spec.json")
+    ap.add_argument("--port", type=int, default=8766)
+    ap.add_argument("--init", action="store_true", help="crea una spec di esempio")
+    ap.add_argument("--root", default=".", help="radice del codice a cui puntano le ancore (default: cartella corrente)")
+    ap.add_argument("--check", action="store_true", help="controlla le ancore contro il codice, stampa il rapporto, esce con 1 se qualcosa e' rotto")
+    ap.add_argument("--refresh-cmd", default="", help="command that regenerates the spec: enables the Refresh button")
+    ap.add_argument("--run-cmd", default="", help="command (python run.py <repo> <blueprint.js> <state dir>) that runs notes in a git worktree: enables the Run button")
+    ap.add_argument("--rules-cmd", default="", help="command (python rules.py <repo> <rules.json>) that checks architecture rules: enables the Rules section")
+    ap.add_argument("--ask-cmd", default="", help="command (python ask.py <repo>) that answers questions about a component: enables the Ask box")
+    ap.add_argument("--plan-cmd", default="", help="command (python plan.py <repo> <state dir>) that turns notes into an architecture plan: enables Plan changes")
+    ap.add_argument("--code-ext", default=".py", help="comma-separated extensions that count as code, e.g. .py,.tf,.yaml (default .py)")
+    ap.add_argument("--sigilla", action="store_true", help="memorizza lo stato attuale del codice ancorato come verificato")
+    A = ap.parse_args()
+    EXTS = tuple(e.strip() for e in A.code_ext.split(",") if e.strip())
+    if A.init:
+        if os.path.exists(A.spec): sys.exit(f"{A.spec} esiste gia'")
+        json.dump(ESEMPIO, open(A.spec, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        return print(f"Creato {A.spec}. Avvia: {os.path.basename(sys.argv[0])} {A.spec}")
+    spec_path = os.path.abspath(A.spec)
+    if not os.path.exists(spec_path): sys.exit(f"{spec_path} non trovato. Crea un esempio con --init")
+    nota_dir = os.path.join(os.path.dirname(spec_path), ".pipeline-viewer"); nota_file = os.path.join(nota_dir, "note.json")
+    TOKEN, BOOT, LOCK = secrets.token_urlsafe(24), secrets.token_hex(4), threading.Lock()
+    cache = {"m": None, "dati": None}
+    root, sigilli_file = os.path.abspath(A.root), os.path.join(nota_dir, "sigilli.json")
+    pos_file = os.path.join(nota_dir, "posizioni.json")  # {vista: {id nodo: [x, y]}} dei nodi trascinati a mano; la spec non si tocca
+
+    RF = {"running": False, "ok": None, "tail": ""}
+
+    def stato_refresh():
+        last = os.stat(spec_path).st_mtime
+        return {"enabled": bool(A.refresh_cmd), "running": RF["running"], "ok": RF["ok"], "tail": RF["tail"], "last": last,
+                "stale": max(file_py(root).values(), default=0) > last}  # a .py newer than the spec: the blueprint is out of date
+
+    def lancia_refresh():
+        def run():
+            try:
+                r = subprocess.run(A.refresh_cmd, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
+                RF.update(ok=r.returncode == 0, tail=(r.stderr or r.stdout).strip()[-300:])
+            except Exception as e:  # timeout or command not runnable
+                RF.update(ok=False, tail=str(e)[:300])
+            RF["running"] = False
+        with LOCK:
+            if RF["running"]: return
+            RF.update(running=True, ok=None, tail="")
+        threading.Thread(target=run, daemon=True).start()
+
+    RN = {"running": False, "ok": None, "tail": ""}
+    run_file = os.path.join(nota_dir, "run.json")  # written by the run command when a run finishes; deleted on apply/discard
+
+    def leggi_run():
+        try: return json.load(open(run_file, encoding="utf-8"))
+        except (OSError, ValueError): return None
+
+    def scrivi_note(note):
+        os.makedirs(nota_dir, exist_ok=True)
+        with open(nota_file + ".tmp", "w", encoding="utf-8") as f: json.dump(note, f, ensure_ascii=False, indent=1)
+        os.replace(nota_file + ".tmp", nota_file)
+
+    def set_stato(ids, st, risposta=None):  # LOCK held by the caller; ids=None: every note in progress
+        note = leggi_note()
+        for n in note:
+            if n["id"] in ids if ids is not None else n.get("stato") == "in lavorazione":
+                n["stato"] = st
+                if risposta: n["risposta"] = risposta
+        scrivi_note(note)
+
+    def lancia_run(prompt_file):  # LOCK held by the caller
+        def go():
+            try:
+                r = subprocess.run(f'{A.run_cmd} run "{prompt_file}"', shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2400)
+                RN.update(ok=r.returncode == 0, tail=(r.stderr or r.stdout).strip()[-300:])
+            except Exception as e:
+                RN.update(ok=False, tail=str(e)[:300])
+            if not RN["ok"]:
+                with LOCK: set_stato(None, "aperta")  # failed run: the notes go back to open
+            RN["running"] = False
+        RN.update(running=True, ok=None, tail="")
+        threading.Thread(target=go, daemon=True).start()
+
+    def corri(cmd, timeout=180):
+        """Runs a helper command: (ok, stdout) or (False, short error)."""
+        try: r = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        except subprocess.TimeoutExpired: return False, "timed out"
+        return r.returncode == 0, r.stdout.strip() if r.returncode == 0 else (r.stderr or r.stdout).strip()[-300:]
+
+    def con_testo(testo, fn):  # user text goes to the helper through a temp file, never onto the shell line
+        os.makedirs(nota_dir, exist_ok=True); fd, p = tempfile.mkstemp(dir=nota_dir, suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(testo)
+        try: return fn(p)
+        finally: os.unlink(p)
+
+    stili_file = os.path.join(nota_dir, "stili.json")  # {element id: look overrides}; the spec is never touched
+    COLORE = re.compile(r"#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20}|(?:rgb|hsl)a?\([0-9 ,.%]{1,40}\)")
+    CHIAVI = {"nodo": ("bg", "fg", "border", "borderStyle", "radius"), "freccia": ("color", "width", "line", "arrow")}
+    SCELTE = {"borderStyle": ("solid", "dashed", "dotted"), "line": ("solid", "dashed", "dotted"), "arrow": ("triangle", "vee", "none", "circle", "diamond", "tee")}
+
+    def leggi_stili():
+        try: return json.load(open(stili_file, encoding="utf-8"))
+        except (OSError, ValueError): return {}
+
+    def stile_valido(tipo, s):
+        """Only whitelisted keys with validated values survive: they end up in CSS and Cytoscape styles. None = reset that key."""
+        out = {}
+        for k, v in s.items():
+            if k not in CHIAVI[tipo]: continue
+            if v is None: out[k] = None
+            elif k in SCELTE:
+                if v in SCELTE[k]: out[k] = v
+            elif k in ("radius", "width"):
+                if isinstance(v, (int, float)) and not isinstance(v, bool): out[k] = int(min(60 if k == "radius" else 8, max(1 if k == "width" else 0, v)))
+            elif isinstance(v, str) and COLORE.fullmatch(v): out[k] = v
+        return out
+
+    annot_file = os.path.join(nota_dir, "annotazioni.json")  # free shapes / comments / emoji drawn by the user: {id, vista, kind, x, y, w, h, text, color}
+    FORME = ("rect", "ellipse", "diamond", "triangle", "star", "hexagon", "text", "emoji")
+
+    def leggi_annot():
+        try: return json.load(open(annot_file, encoding="utf-8"))
+        except (OSError, ValueError): return []
+
+    def annot_valida(d):
+        """Only the fields we know, with validated values (the text is drawn on a canvas, never as HTML)."""
+        out, num = {}, lambda v, lo, hi: isinstance(v, (int, float)) and not isinstance(v, bool) and lo <= v <= hi
+        if d.get("kind") in FORME: out["kind"] = d["kind"]
+        for k in ("x", "y"):
+            if num(d.get(k), -1e5, 1e5): out[k] = round(d[k])
+        for k in ("w", "h"):
+            if num(d.get(k), 20, 600): out[k] = round(d[k])
+        if isinstance(d.get("text"), str) and len(d["text"]) <= 300: out["text"] = d["text"]
+        if isinstance(d.get("color"), str) and re.fullmatch(r"#[0-9a-fA-F]{6}", d["color"]): out["color"] = d["color"]
+        return out
+
+    PN = {"running": False, "ok": None, "tail": ""}
+    plan_file = os.path.join(nota_dir, "plan.json")  # written by the plan command; removed on discard, or when its run is applied/discarded
+
+    def leggi_plan():
+        try: return json.load(open(plan_file, encoding="utf-8"))
+        except (OSError, ValueError): return None
+
+    def lancia_plan(pf, model):  # LOCK held by the caller
+        def go():
+            try:
+                r = subprocess.run(f'{A.plan_cmd} make "{pf}" {model}', shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+                PN.update(ok=r.returncode == 0, tail=(r.stderr or r.stdout).strip()[-300:])
+            except Exception as e:
+                PN.update(ok=False, tail=str(e)[:300])
+            PN["running"] = False
+        PN.update(running=True, ok=None, tail="")
+        threading.Thread(target=go, daemon=True).start()
+
+    perm_dir = os.path.join(nota_dir, "perm")  # the run command writes <id>.req.json; the answer goes to <id>.res.json
+
+    def leggi_perm():
+        out = []
+        try:
+            for f in sorted(os.listdir(perm_dir)):
+                if f.endswith(".req.json") and not os.path.exists(os.path.join(perm_dir, f[:-9] + ".res.json")):
+                    try: out.append(json.load(open(os.path.join(perm_dir, f), encoding="utf-8")))
+                    except (OSError, ValueError): pass  # still being written
+        except OSError: pass
+        return sorted(out, key=lambda r: r.get("at", 0))
+
+    def leggi_pos():
+        try: return json.load(open(pos_file, encoding="utf-8"))
+        except (OSError, ValueError): return {}
+
+    def leggi_sigilli():
+        try: return json.load(open(sigilli_file, encoding="utf-8"))
+        except (OSError, ValueError): return {}
+
+    def verifica(spec):
+        """None se la spec non usa ancore (spec vecchie: nessun controllo), altrimenti (E, esito di controlla)."""
+        if not any(b.get("ancore") or any(n.get("ancore") for n in (b.get("interno") or {}).get("nodi", [])) for b in spec["blocchi"]): return None
+        E = estrai(root); return E, controlla(spec, E, leggi_sigilli())
+
+    def dati():
+        # si ricalcola se cambia la spec o un qualunque .py: la pagina segue il codice
+        m = (os.stat(spec_path).st_mtime, hash(frozenset(file_py(root).items())), os.path.getmtime(pos_file) if os.path.exists(pos_file) else 0)
+        if cache["m"] != m:
+            try:
+                spec = json.load(open(spec_path, encoding="utf-8"))
+                err = valida(spec)
+                v = None if err else verifica(spec)
+                cache["dati"] = {"errore": err} if err else costruisci(spec, v and v[1], leggi_pos())
+            except (OSError, ValueError) as e:
+                cache["dati"] = {"errore": f"Invalid JSON: {e}"}
+            cache["m"] = m
+        return cache["dati"]
+
+    if A.check or A.sigilla:
+        spec = json.load(open(spec_path, encoding="utf-8")); err = valida(spec)
+        if err: sys.exit(err)
+        v = verifica(spec)
+        if not v: sys.exit("la spec non ha «ancore»: niente da controllare")
+        E, r = v
+        if A.sigilla:
+            os.makedirs(nota_dir, exist_ok=True)
+            json.dump({s: E["sim"][s]["hash"] for ss in r["sids"].values() for s in ss}, open(sigilli_file, "w", encoding="utf-8"))
+            return print(f"sigillati {len({s for ss in r['sids'].values() for s in ss})} simboli")
+        cp = r["copertura"]; brutti = {k: x for k, x in r["stati"].items() if x["stato"] != "ok"}
+        senza = [k for k, ok in r["archi"].items() if not ok]
+        for k, x in brutti.items(): print(f"{x['stato'].upper():16} {k}  {', '.join(x['rotte'])}")
+        for k in senza: print(f"{'SENZA PROVA':16} {k}")
+        print(f"copertura {cp['coperti']}/{cp['tot']} simboli; non coperti: {', '.join(cp['scoperti'][:10])}{'...' if len(cp['scoperti']) > 10 else ''}")
+        sys.exit(1 if brutti or senza else 0)
+
+    def leggi_note():
+        try: return json.load(open(nota_file, encoding="utf-8"))
+        except (OSError, ValueError): return []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def send(self, code, body, ctype="application/json"):
+            b = body.encode()
+            self.send_response(code); self.send_header("Content-Type", ctype + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(b))); self.send_header("Cache-Control", "no-store"); self.end_headers()
+            try: self.wfile.write(b)
+            except (BrokenPipeError, ConnectionResetError): pass
+        def j(self, code, o): self.send(code, json.dumps(o, ensure_ascii=False))
+        def host_ok(self): return self.headers.get("Host") in (f"127.0.0.1:{A.port}", f"localhost:{A.port}")
+        def do_GET(self):
+            if not self.host_ok(): return self.j(403, {"errore": "host not allowed"})
+            if self.path == "/": return self.send(200, PAGE.replace("__TOKEN__", TOKEN), "text/html")
+            if self.path.startswith("/vendor/") and self.path[8:] in VENDOR:
+                try: return self.send(200, open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", self.path[8:]), encoding="utf-8").read(), "application/javascript")
+                except OSError: return self.j(404, {"errore": "missing library: also copy the vendor folder"})
+            if self.path == "/api/versione": return self.j(200, {"boot": BOOT})
+            if self.path == "/api/pipeline": return self.j(200, {**dati(), "note": leggi_note(), "refresh": stato_refresh(), "perm": leggi_perm(), "plan": {"enabled": bool(A.plan_cmd), "running": PN["running"], "ok": PN["ok"], "tail": PN["tail"], "result": leggi_plan()}, "annot": leggi_annot(), "stili": leggi_stili(), "caps": {"rules": bool(A.rules_cmd), "ask": bool(A.ask_cmd)},
+                                                  "run": {"enabled": bool(A.run_cmd), "running": RN["running"], "ok": RN["ok"], "tail": RN["tail"], "result": leggi_run()}})
+            if self.path in ("/api/prompt?tipo=modello", "/api/prompt?tipo=note"):  # testo da incollare in Claude Code
+                if self.path.endswith("modello"): return self.j(200, {"prompt": prompt_modello(spec_path, root)})
+                aperte = [n for n in leggi_note() if n.get("stato", "aperta") == "aperta" and n["target"] in dati().get("meta", {})]
+                v = verifica(json.load(open(spec_path, encoding="utf-8")))
+                return self.j(200, {"prompt": prompt_note(aperte, *(v or (None, None)), nota_file), "n": len(aperte)})
+            if self.path == "/api/rules" and A.rules_cmd:
+                ok, out = corri(f"{A.rules_cmd} check")
+                return self.j(200, json.loads(out)) if ok else self.j(500, {"errore": out})
+            self.j(404, {"errore": "not found"})
+        def do_POST(self):
+            if not self.host_ok(): return self.j(403, {"errore": "host not allowed"})
+            try: d = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 200000)) or b"{}")
+            except ValueError: return self.j(400, {"errore": "invalid request"})
+            if self.path not in ("/api/nota", "/api/pos", "/api/refresh", "/api/run", "/api/rules", "/api/ask", "/api/annot", "/api/plan", "/api/perm") or not isinstance(d, dict) or not hmac.compare_digest(str(d.get("token", "")), TOKEN):
+                return self.j(403, {"errore": "not authorized"})
+            if self.path == "/api/pos":
+                vista, i, az = str(d.get("vista", "")), str(d.get("id", "")), d.get("azione")
+                coord = [d.get("x"), d.get("y")]
+                with LOCK:
+                    pos = leggi_pos()
+                    if az == "reset": pos.pop(vista, None)
+                    elif az == "sposta" and dati().get("meta", {}).get((vista + "/" if vista else "") + i, {}).get("tipo") in ("nodo", "esterno", "nota") \
+                            and all(isinstance(c, (int, float)) and abs(c) < 1e5 for c in coord):
+                        pos.setdefault(vista, {})[i] = coord
+                    else: return self.j(400, {"errore": "invalid position"})
+                    os.makedirs(nota_dir, exist_ok=True)
+                    with open(pos_file + ".tmp", "w", encoding="utf-8") as f: json.dump(pos, f)
+                    os.replace(pos_file + ".tmp", pos_file)
+                return self.j(200, {"ok": True})
+            if self.path == "/api/refresh":
+                if not A.refresh_cmd: return self.j(400, {"errore": "refresh not configured"})
+                lancia_refresh(); return self.j(200, {"ok": True})
+            if self.path == "/api/annot":
+                L, vv, ids = [], ("", *dati().get("dettagli", {})), set()
+                ok = d.get("azione") == "set" and isinstance(d.get("annot"), list) and len(d["annot"]) <= 300
+                for a in d["annot"] if ok else []:
+                    f = annot_valida(a) if isinstance(a, dict) else {}
+                    if not ({"kind", "x", "y"} <= f.keys() and re.fullmatch(r"[0-9a-f]{8}", str(a.get("id", ""))) and a["id"] not in ids and str(a.get("vista", "")) in vv):
+                        ok = False; break
+                    ids.add(a["id"]); L.append({"id": a["id"], "vista": str(a.get("vista", "")), "w": 140, "h": 80, "text": "", "color": "#3b6fd4", **f})
+                if not ok: return self.j(400, {"errore": "invalid annotations"})
+                with LOCK:
+                    os.makedirs(nota_dir, exist_ok=True)
+                    with open(annot_file + ".tmp", "w", encoding="utf-8") as fh: json.dump(L, fh, ensure_ascii=False)
+                    os.replace(annot_file + ".tmp", annot_file)
+                return self.j(200, {"annot": L})
+            if self.path == "/api/perm":
+                i, dec = str(d.get("id", "")), d.get("decision")
+                if not re.fullmatch(r"[0-9a-f]{8}", i) or dec not in ("once", "run", "deny") or not os.path.exists(os.path.join(perm_dir, i + ".req.json")):
+                    return self.j(400, {"errore": "invalid answer"})
+                pr = os.path.join(perm_dir, i + ".res.json")
+                with open(pr + ".tmp", "w", encoding="utf-8") as f: json.dump({"decision": dec}, f)
+                os.replace(pr + ".tmp", pr)  # atomic: the waiting agent never reads half an answer
+                return self.j(200, {"ok": True})
+            if self.path == "/api/plan":
+                if not A.plan_cmd: return self.j(400, {"errore": "plan not configured"})
+                az, res = d.get("azione"), leggi_plan()
+                model = d.get("model") if d.get("model") in ("sonnet", "opus", "haiku") else "sonnet"  # whitelist: it goes onto the shell line
+                with LOCK:
+                    if PN["running"] or RN["running"]: return self.j(400, {"errore": "a plan or a run is in progress"})
+                    aperte = [n for n in leggi_note() if n.get("stato", "aperta") == "aperta" and n["target"] in dati().get("meta", {})]
+                    if az == "start":
+                        if res or leggi_run() or not aperte: return self.j(400, {"errore": "review or discard the current plan or run first" if res or leggi_run() else "no open notes"})
+                        os.makedirs(nota_dir, exist_ok=True); pf = os.path.join(nota_dir, "plan-input.json")
+                        coms = [a["text"].strip() for a in leggi_annot() if a["kind"] == "text" and a["text"].strip() not in ("", "Comment")][:20]  # loose comments on the canvas
+                        with open(pf, "w", encoding="utf-8") as f: json.dump({"notes": [{k: n[k] for k in ("id", "target", "titolo", "nota")} for n in aperte], "comments": coms}, f, ensure_ascii=False)
+                        lancia_plan(pf, model); return self.j(200, {"ok": True})
+                    if az == "discard":
+                        if os.path.exists(plan_file): os.unlink(plan_file)
+                        PN.update(ok=None, tail=""); return self.j(200, {"ok": True})
+                    if az == "approve" and res and not leggi_run():
+                        aperte = [n for n in aperte if n["id"] in res["notes"]]
+                        if not aperte: return self.j(400, {"errore": "the planned notes are no longer open"})
+                        v = verifica(json.load(open(spec_path, encoding="utf-8"))); pf = os.path.join(nota_dir, "run-prompt.txt")
+                        with open(pf, "w", encoding="utf-8") as f:
+                            f.write(prompt_note(aperte, *(v or (None, None))) + "\n\nApproved architecture plan: the code must end up with exactly this structure and no other structural change:\n" + "\n".join(res["lines"]))
+                        set_stato({n["id"] for n in aperte}, "in lavorazione"); lancia_run(pf)
+                        return self.j(200, {"ok": True})
+                return self.j(400, {"errore": "invalid action"})
+            if self.path == "/api/rules":
+                if not A.rules_cmd: return self.j(400, {"errore": "rules not configured"})
+                t = d.get("text")
+                if d.get("azione") == "add" and isinstance(t, str) and 0 < len(t.strip()) <= 300: ok, out = con_testo(t.strip(), lambda p: corri(f'{A.rules_cmd} add "{p}"'))
+                elif d.get("azione") == "del" and re.fullmatch(r"[0-9a-f]{8}", str(d.get("id", ""))): ok, out = corri(f'{A.rules_cmd} del {d["id"]}')
+                else: return self.j(400, {"errore": "invalid action"})
+                return self.j(200, {"ok": True}) if ok else self.j(400, {"errore": out})
+            if self.path == "/api/ask":
+                t, q = str(d.get("target", "")), d.get("q")
+                tipo, comp = dati().get("meta", {}).get(t, {}).get("tipo"), t.split("/")[0]  # a step inside a block asks about the block
+                if not A.ask_cmd or not isinstance(q, str) or not 0 < len(q.strip()) <= 500 or tipo not in CHIAVI or not re.fullmatch(r"[\w>().-]+", comp):
+                    return self.j(400, {"errore": "invalid question"})
+                model = d.get("model") if d.get("model") in ("sonnet", "opus", "haiku") else "sonnet"  # whitelist: it goes onto the shell line
+                ok, out = con_testo(q.strip(), lambda p: corri(f'{A.ask_cmd} "{comp}" "{p}" {model} {"node" if tipo == "nodo" else "edge"}', 300))
+                if not ok: return self.j(400, {"errore": out})
+                s = out.strip()
+                if s.startswith("```"): s = s.strip("`").removeprefix("json").strip()
+                try: j = json.loads(s)
+                except ValueError: j = None
+                if not (isinstance(j, dict) and isinstance(j.get("style"), dict)): return self.j(200, {"answer": out})  # a plain answer
+                with LOCK:  # the model asked for a look change: validate, merge, store
+                    st, new = leggi_stili(), stile_valido(tipo, j["style"])
+                    if j["style"].get("reset") is True: st.pop(t, None); msg = "Default look restored."
+                    elif not new: return self.j(200, {"answer": "I could not turn that into a style change I support."})
+                    else:
+                        cur = {k: v for k, v in {**st.get(t, {}), **new}.items() if v is not None}
+                        st.pop(t, None)
+                        if cur: st[t] = cur
+                        msg = "Look updated: " + ", ".join(f"{k} = {v}" for k, v in new.items() if v is not None) + "."
+                    os.makedirs(nota_dir, exist_ok=True)
+                    with open(stili_file + ".tmp", "w", encoding="utf-8") as f: json.dump(st, f)
+                    os.replace(stili_file + ".tmp", stili_file)
+                return self.j(200, {"answer": msg, "stili": st})
+            if self.path == "/api/run":
+                if not A.run_cmd: return self.j(400, {"errore": "run not configured"})
+                az, res = d.get("azione"), leggi_run()
+                with LOCK:
+                    if RN["running"]: return self.j(400, {"errore": "a run is in progress"})
+                    if az == "start":
+                        aperte = [n for n in leggi_note() if n.get("stato", "aperta") == "aperta" and n["target"] in dati().get("meta", {})]
+                        if res or leggi_plan() or not aperte: return self.j(400, {"errore": "review or discard the previous run first" if res else "approve or discard the plan first" if leggi_plan() else "no open notes"})
+                        os.makedirs(nota_dir, exist_ok=True); pf = os.path.join(nota_dir, "run-prompt.txt")
+                        v = verifica(json.load(open(spec_path, encoding="utf-8")))
+                        with open(pf, "w", encoding="utf-8") as f: f.write(prompt_note(aperte, *(v or (None, None))))
+                        set_stato({n["id"] for n in aperte}, "in lavorazione"); lancia_run(pf)
+                        return self.j(200, {"ok": True})
+                    if not res or az not in ("apply", "discard"): return self.j(400, {"errore": "invalid action"})
+                    g = d.get("groups") if isinstance(d.get("groups"), list) else []
+                    keep = [x for x in g if x in {y["id"] for y in res["groups"]}] if az == "apply" else []  # only ids the run itself produced reach the shell
+                    r = subprocess.run(f'{A.run_cmd} {az} "{",".join(keep)}"', shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+                    if r.returncode: return self.j(500, {"errore": (r.stderr or r.stdout).strip()[-300:]})
+                    RN.update(ok=None, tail="")
+                    set_stato(None, "fatta" if az == "apply" else "aperta", "Applied after review" if az == "apply" else None)
+                return self.j(200, {"ok": True})
+            with LOCK:
+                note = leggi_note()
+                if d.get("azione") == "aggiungi":
+                    meta = dati().get("meta", {}); t, testo = d.get("target"), d.get("nota")
+                    if t not in meta or not isinstance(testo, str) or not 0 < len(testo.strip()) <= 1000 or len(note) >= 200:
+                        return self.j(400, {"errore": "invalid note"})
+                    note.append({"id": secrets.token_hex(4), "target": t, "titolo": meta[t]["titolo"], "nota": testo.strip(),
+                                 "stato": "aperta", "quando": datetime.datetime.now().isoformat(timespec="seconds")})
+                elif d.get("azione") == "elimina":
+                    note = [x for x in note if x.get("id") != d.get("id")]
+                else:
+                    return self.j(400, {"errore": "invalid action"})
+                scrivi_note(note)
+            self.j(200, {"note": note})
+
+    def riavvia_se_cambia():  # sviluppo dal vivo del tool stesso: se questo file cambia, si riavvia
+        src = os.path.abspath(__file__); m0 = os.stat(src).st_mtime
+        while True:
+            time.sleep(2)
+            try:
+                if os.stat(src).st_mtime != m0: os.execv(sys.executable, [sys.executable] + sys.argv)
+            except OSError: pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", A.port), H)
+    threading.Thread(target=riavvia_se_cambia, daemon=True).start()
+    print(f"http://127.0.0.1:{A.port}/   spec: {spec_path}   note: {nota_file}", flush=True)
+    try: srv.serve_forever()
+    except KeyboardInterrupt: pass
+
+
+if __name__ == "__main__":
+    main()

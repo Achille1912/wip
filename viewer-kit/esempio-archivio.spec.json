@@ -1,0 +1,2524 @@
+{
+ "titolo": "Archivio: come viaggia un documento",
+ "blocchi": [
+  {
+   "id": "tu",
+   "testo": "Tu|scansione, download, foto",
+   "tipo": "actor",
+   "codice": "(esterno)",
+   "interno": {
+    "titolo": "Tu: da dove arrivano i file",
+    "nodi": [
+     {
+      "id": "scan",
+      "testo": "Scanner|o app sul telefono",
+      "tipo": "actor",
+      "codice": ""
+     },
+     {
+      "id": "dl",
+      "testo": "Download|siti, banche, email",
+      "tipo": "actor",
+      "codice": ""
+     },
+     {
+      "id": "foto",
+      "testo": "Foto|di un documento",
+      "tipo": "actor",
+      "codice": ""
+     },
+     {
+      "id": "inbox",
+      "testo": "Salvi il file in|00_INBOX",
+      "tipo": "store",
+      "codice": "IN"
+     }
+    ],
+    "archi": [
+     [
+      "scan",
+      "inbox"
+     ],
+     [
+      "dl",
+      "inbox"
+     ],
+     [
+      "foto",
+      "inbox"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    70,
+    260,
+    60
+   ]
+  },
+  {
+   "id": "inbox",
+   "testo": "00_INBOX|i file da smistare",
+   "tipo": "store",
+   "codice": "IN, trova_file()",
+   "interno": {
+    "titolo": "00_INBOX: cosa vede lo script",
+    "nodi": [
+     {
+      "id": "f",
+      "testo": "Nuovo file|in 00_INBOX",
+      "tipo": "store",
+      "codice": "IN"
+     },
+     {
+      "id": "flt",
+      "testo": "Filtri di trova_file()|niente nascosti, vuoti|o cartelle",
+      "tipo": "step",
+      "codice": "trova_file()"
+     },
+     {
+      "id": "tipi",
+      "testo": "Testo solo da PDF, JPG, PNG|gli altri tipi: solo regole sul nome",
+      "tipo": "step",
+      "codice": "testo()"
+     },
+     {
+      "id": "l",
+      "testo": "Elenco mostrato|nell'anteprima",
+      "tipo": "step",
+      "codice": "main()"
+     }
+    ],
+    "archi": [
+     [
+      "f",
+      "flt"
+     ],
+     [
+      "flt",
+      "tipi"
+     ],
+     [
+      "tipi",
+      "l"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    70,
+    300,
+    60
+   ]
+  },
+  {
+   "id": "timer",
+   "testo": "Timer ogni giorno|controlla INBOX e avvisa",
+   "tipo": "step",
+   "codice": "archivio-smista.timer (systemd)",
+   "auto": true,
+   "interno": {
+    "titolo": "Timer giornaliero",
+    "nodi": [
+     {
+      "id": "tm",
+      "testo": "Timer systemd|ogni giorno, circa mezzanotte",
+      "tipo": "step",
+      "codice": "archivio-smista.timer"
+     },
+     {
+      "id": "sv",
+      "testo": "archivio-smista.service|lancia archivio-smista",
+      "tipo": "step",
+      "codice": "archivio-smista.service"
+     },
+     {
+      "id": "pre",
+      "testo": "Anteprima|non sposta nulla",
+      "tipo": "step",
+      "codice": "main()"
+     },
+     {
+      "id": "q",
+      "testo": "Ci sono file|sicuri o proposte?",
+      "tipo": "dec",
+      "codice": ""
+     },
+     {
+      "id": "nt",
+      "testo": "Notifica sul desktop|N sicuri, M da controllare",
+      "tipo": "ok",
+      "codice": "notify-send"
+     },
+     {
+      "id": "no",
+      "testo": "Silenzio",
+      "tipo": "store",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "tm",
+      "sv"
+     ],
+     [
+      "sv",
+      "pre"
+     ],
+     [
+      "pre",
+      "q"
+     ],
+     [
+      "q",
+      "nt",
+      "sì"
+     ],
+     [
+      "q",
+      "no",
+      "no"
+     ]
+    ]
+   },
+   "pos": [
+    800,
+    70,
+    280,
+    60
+   ]
+  },
+  {
+   "id": "regole_nome",
+   "testo": "_regole.txt|18 regole: sigla → cartella|es. «wind» → …/02_Infostrada|si modifica a mano, non da sola",
+   "tipo": "store",
+   "codice": "RULES_NOME, carica_regole()",
+   "interno": {
+    "titolo": "_regole.txt: le regole sul nome",
+    "nodi": [
+     {
+      "id": "file",
+      "testo": "_regole.txt|nella radice dell'archivio",
+      "tipo": "store",
+      "codice": "REGOLE"
+     },
+     {
+      "id": "fb",
+      "testo": "Se il file manca:|regole interne nel codice",
+      "tipo": "store",
+      "codice": "RULES_NOME"
+     },
+     {
+      "id": "car",
+      "testo": "carica_regole()|letto a ogni avvio",
+      "tipo": "step",
+      "codice": "carica_regole()"
+     },
+     {
+      "id": "mem",
+      "testo": "RULES_NOME in memoria|vince la prima che corrisponde",
+      "tipo": "step",
+      "codice": "RULES_NOME"
+     },
+     {
+      "id": "orf",
+      "testo": "La cartella della regola|esiste ancora?",
+      "tipo": "dec",
+      "codice": "regole_orfane()"
+     },
+     {
+      "id": "av",
+      "testo": "Avviso giallo|e voce in Igiene",
+      "tipo": "prop",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "file",
+      "car"
+     ],
+     [
+      "fb",
+      "car",
+      "se manca"
+     ],
+     [
+      "car",
+      "mem"
+     ],
+     [
+      "mem",
+      "orf"
+     ],
+     [
+      "orf",
+      "av",
+      "no"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    155,
+    260,
+    110
+   ]
+  },
+  {
+   "id": "s1_nome",
+   "testo": "1. Il nome contiene una|sigla della tabella?",
+   "tipo": "dec",
+   "codice": "decidi_file(): abbina(nome, RULES_NOME)",
+   "interno": {
+    "titolo": "1. Il nome contiene una sigla?",
+    "nodi": [
+     {
+      "id": "nm",
+      "testo": "Nome del file",
+      "tipo": "store",
+      "codice": ""
+     },
+     {
+      "id": "lp",
+      "testo": "Per ogni regola, in ordine|re.search senza maiuscole",
+      "tipo": "step",
+      "codice": "abbina()"
+     },
+     {
+      "id": "m",
+      "testo": "Corrisponde?",
+      "tipo": "dec",
+      "codice": ""
+     },
+     {
+      "id": "ok",
+      "testo": "Vince la prima:|cartella della regola",
+      "tipo": "ok",
+      "codice": "decidi_file()"
+     },
+     {
+      "id": "no",
+      "testo": "Nessuna regola vale|si passa al testo",
+      "tipo": "step",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "nm",
+      "lp"
+     ],
+     [
+      "lp",
+      "m"
+     ],
+     [
+      "m",
+      "ok",
+      "sì"
+     ],
+     [
+      "m",
+      "no",
+      "tutte provate"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    170,
+    300,
+    80
+   ]
+  },
+  {
+   "id": "r_sicuro",
+   "testo": "SICURO|cartella scritta nella regola",
+   "tipo": "ok",
+   "codice": "r[\"via\"]=\"nome\"",
+   "interno": {
+    "titolo": "SICURO dal nome",
+    "nodi": [
+     {
+      "id": "reg",
+      "testo": "Cartella scritta|nella regola",
+      "tipo": "ok",
+      "codice": "r['via']='nome'"
+     },
+     {
+      "id": "nocl",
+      "testo": "Nessun controllo di coerenza|la sigla nel nome basta",
+      "tipo": "step",
+      "codice": "cl = None"
+     },
+     {
+      "id": "nome",
+      "testo": "Passo 6|propone il nome",
+      "tipo": "step",
+      "codice": "nuovo_nome()"
+     },
+     {
+      "id": "es",
+      "testo": "SICURO|--go lo sposta",
+      "tipo": "ok",
+      "codice": "--go"
+     }
+    ],
+    "archi": [
+     [
+      "reg",
+      "nocl"
+     ],
+     [
+      "nocl",
+      "nome"
+     ],
+     [
+      "nome",
+      "es"
+     ]
+    ]
+   },
+   "pos": [
+    800,
+    170,
+    280,
+    80
+   ]
+  },
+  {
+   "id": "cache",
+   "testo": "Cache OCR|il testo si legge una volta sola",
+   "tipo": "store",
+   "codice": "CACHE (~/.cache/archivio-smista)",
+   "interno": {
+    "titolo": "Cache del testo (OCR)",
+    "nodi": [
+     {
+      "id": "ric",
+      "testo": "Serve il testo|di un file",
+      "tipo": "step",
+      "codice": "testo()"
+     },
+     {
+      "id": "k",
+      "testo": "Chiave: dimensione, data|e nome del file",
+      "tipo": "step",
+      "codice": "testo()"
+     },
+     {
+      "id": "hit",
+      "testo": "In cache?",
+      "tipo": "dec",
+      "codice": "CACHE"
+     },
+     {
+      "id": "leg",
+      "testo": "Legge il .txt da|~/.cache/archivio-smista",
+      "tipo": "store",
+      "codice": "CACHE"
+     },
+     {
+      "id": "est",
+      "testo": "Estrae il testo|passo 2",
+      "tipo": "step",
+      "codice": "testo()"
+     },
+     {
+      "id": "sal",
+      "testo": "Salva in cache|solo se non vuoto",
+      "tipo": "store",
+      "codice": "testo()"
+     }
+    ],
+    "archi": [
+     [
+      "ric",
+      "k"
+     ],
+     [
+      "k",
+      "hit"
+     ],
+     [
+      "hit",
+      "leg",
+      "sì"
+     ],
+     [
+      "hit",
+      "est",
+      "no"
+     ],
+     [
+      "est",
+      "sal"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    290,
+    260,
+    70
+   ]
+  },
+  {
+   "id": "s2_testo",
+   "testo": "2. Legge il testo|PDF col testo oppure OCR",
+   "tipo": "step",
+   "codice": "testo(f): pdftotext / tesseract",
+   "interno": {
+    "titolo": "2. Lettura del testo",
+    "nodi": [
+     {
+      "id": "f",
+      "testo": "File",
+      "tipo": "store",
+      "codice": ""
+     },
+     {
+      "id": "t",
+      "testo": "È un PDF?",
+      "tipo": "dec",
+      "codice": "testo()"
+     },
+     {
+      "id": "pt",
+      "testo": "pdftotext|prime 2 pagine",
+      "tipo": "step",
+      "codice": "testo()"
+     },
+     {
+      "id": "poco",
+      "testo": "Meno di 50 caratteri?|scansione senza testo",
+      "tipo": "dec",
+      "codice": "testo()"
+     },
+     {
+      "id": "ocr",
+      "testo": "pdftoppm 150 dpi,|tesseract ita, 2 pagine",
+      "tipo": "step",
+      "codice": "testo()"
+     },
+     {
+      "id": "img",
+      "testo": "Immagine:|tesseract ita",
+      "tipo": "step",
+      "codice": "testo()"
+     },
+     {
+      "id": "out",
+      "testo": "Testo|salvato in cache",
+      "tipo": "store",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "f",
+      "t"
+     ],
+     [
+      "t",
+      "pt",
+      "sì"
+     ],
+     [
+      "t",
+      "img",
+      "JPG o PNG"
+     ],
+     [
+      "pt",
+      "poco"
+     ],
+     [
+      "poco",
+      "ocr",
+      "sì"
+     ],
+     [
+      "poco",
+      "out",
+      "no"
+     ],
+     [
+      "ocr",
+      "out"
+     ],
+     [
+      "img",
+      "out"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    290,
+    300,
+    70
+   ]
+  },
+  {
+   "id": "regole_testo",
+   "testo": "_regole.txt|9 regole: parole → cartella|es. «busta paga» →|09_Buste Paga",
+   "tipo": "store",
+   "codice": "RULES_TESTO, carica_regole()",
+   "interno": {
+    "titolo": "_regole.txt: le regole sul testo",
+    "nodi": [
+     {
+      "id": "file",
+      "testo": "_regole.txt|righe «testo: regex => cartella»",
+      "tipo": "store",
+      "codice": "RULES_TESTO"
+     },
+     {
+      "id": "per",
+      "testo": "Parole scelte perché|compaiono in una sola cartella",
+      "tipo": "store",
+      "codice": "RULES_TESTO"
+     },
+     {
+      "id": "car",
+      "testo": "carica_regole()",
+      "tipo": "step",
+      "codice": "carica_regole()"
+     },
+     {
+      "id": "mem",
+      "testo": "RULES_TESTO in memoria|vince la prima che corrisponde",
+      "tipo": "step",
+      "codice": "RULES_TESTO"
+     },
+     {
+      "id": "orf",
+      "testo": "La cartella della regola|esiste ancora?",
+      "tipo": "dec",
+      "codice": "regole_orfane()"
+     },
+     {
+      "id": "av",
+      "testo": "Avviso giallo|e voce in Igiene",
+      "tipo": "prop",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "file",
+      "car"
+     ],
+     [
+      "per",
+      "file"
+     ],
+     [
+      "car",
+      "mem"
+     ],
+     [
+      "mem",
+      "orf"
+     ],
+     [
+      "orf",
+      "av",
+      "no"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    390,
+    260,
+    100
+   ]
+  },
+  {
+   "id": "r_incrociato",
+   "testo": "Controllo di coerenza|I documenti più simili già|archiviati stanno in altra cartella?|sì: DUBBIO · no: SICURO",
+   "tipo": "dec",
+   "codice": "decidi_file(): classico() → r[\"dubbio\"]",
+   "interno": {
+    "titolo": "Controllo di coerenza",
+    "nodi": [
+     {
+      "id": "dest",
+      "testo": "Cartella scelta dalla|regola sul testo",
+      "tipo": "step",
+      "codice": "decidi_file()"
+     },
+     {
+      "id": "cl",
+      "testo": "Cerca i documenti simili|passo 4",
+      "tipo": "step",
+      "codice": "classico()"
+     },
+     {
+      "id": "c1",
+      "testo": "Confidenza ≥ 0,4?",
+      "tipo": "dec",
+      "codice": "SOGLIA_CLASSICO"
+     },
+     {
+      "id": "c2",
+      "testo": "I simili stanno in un'altra|cartella non imparentata?",
+      "tipo": "dec",
+      "codice": "parente()"
+     },
+     {
+      "id": "du",
+      "testo": "DUBBIO|non si sposta da solo",
+      "tipo": "prop",
+      "codice": "r['dubbio']"
+     },
+     {
+      "id": "si",
+      "testo": "SICURO|resta com'è",
+      "tipo": "ok",
+      "codice": ""
+     },
+     {
+      "id": "ig",
+      "testo": "Controllo saltato|pochi dati",
+      "tipo": "store",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "dest",
+      "cl"
+     ],
+     [
+      "cl",
+      "c1"
+     ],
+     [
+      "c1",
+      "c2",
+      "sì"
+     ],
+     [
+      "c1",
+      "ig",
+      "no"
+     ],
+     [
+      "c2",
+      "du",
+      "sì"
+     ],
+     [
+      "c2",
+      "si",
+      "no"
+     ]
+    ]
+   },
+   "pos": [
+    800,
+    395,
+    280,
+    90
+   ]
+  },
+  {
+   "id": "s3_testo",
+   "testo": "3. Il testo contiene|parole della tabella?",
+   "tipo": "dec",
+   "codice": "decidi_file(): abbina(txt, RULES_TESTO)",
+   "interno": {
+    "titolo": "3. Parole chiave nel testo",
+    "nodi": [
+     {
+      "id": "tx",
+      "testo": "Testo del documento",
+      "tipo": "store",
+      "codice": ""
+     },
+     {
+      "id": "lp",
+      "testo": "Per ogni regola «testo:»|re.search senza maiuscole",
+      "tipo": "step",
+      "codice": "abbina()"
+     },
+     {
+      "id": "m",
+      "testo": "Corrisponde?",
+      "tipo": "dec",
+      "codice": ""
+     },
+     {
+      "id": "ok",
+      "testo": "Cartella della regola|via = ocr",
+      "tipo": "ok",
+      "codice": "decidi_file()"
+     },
+     {
+      "id": "no",
+      "testo": "Nessuna: si passa ai|documenti simili",
+      "tipo": "step",
+      "codice": ""
+     },
+     {
+      "id": "coh",
+      "testo": "Controllo di coerenza",
+      "tipo": "dec",
+      "codice": "classico()"
+     }
+    ],
+    "archi": [
+     [
+      "tx",
+      "lp"
+     ],
+     [
+      "lp",
+      "m"
+     ],
+     [
+      "m",
+      "ok",
+      "sì"
+     ],
+     [
+      "m",
+      "no",
+      "no"
+     ],
+     [
+      "ok",
+      "coh"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    400,
+    300,
+    80
+   ]
+  },
+  {
+   "id": "docs_arch",
+   "testo": "Documenti già archiviati|testo letto una volta e tenuto|in cache; riletto se il file cambia|(a ogni esecuzione dello script)",
+   "tipo": "store",
+   "codice": "knn_corpus(), testo()",
+   "interno": {
+    "titolo": "Documenti già archiviati",
+    "nodi": [
+     {
+      "id": "sc",
+      "testo": "Scorre l'archivio|escluse INBOX e cestino",
+      "tipo": "step",
+      "codice": "knn_corpus()"
+     },
+     {
+      "id": "fl",
+      "testo": "Solo PDF, JPG, PNG",
+      "tipo": "step",
+      "codice": "knn_corpus()"
+     },
+     {
+      "id": "tx",
+      "testo": "Testo di ognuno|dalla cache del passo 2",
+      "tipo": "store",
+      "codice": "testo()"
+     },
+     {
+      "id": "tk",
+      "testo": "Parole del testo|token()",
+      "tipo": "step",
+      "codice": "token()"
+     },
+     {
+      "id": "idf",
+      "testo": "Peso TF-IDF|le parole rare contano di più",
+      "tipo": "step",
+      "codice": "knn_corpus()"
+     },
+     {
+      "id": "vec",
+      "testo": "Vettore normalizzato|per documento, in memoria",
+      "tipo": "store",
+      "codice": "knn_corpus()"
+     }
+    ],
+    "archi": [
+     [
+      "sc",
+      "fl"
+     ],
+     [
+      "fl",
+      "tx"
+     ],
+     [
+      "tx",
+      "tk"
+     ],
+     [
+      "tk",
+      "idf"
+     ],
+     [
+      "idf",
+      "vec"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    515,
+    260,
+    100
+   ]
+  },
+  {
+   "id": "s4_simili",
+   "testo": "4. Somiglia ai documenti|già archiviati? (TF-IDF)",
+   "tipo": "dec",
+   "codice": "classico(), vicini(), SOGLIA_CLASSICO=0.4, SOGLIA_AUTO=0.7",
+   "interno": {
+    "titolo": "4. Somiglia ai documenti archiviati?",
+    "nodi": [
+     {
+      "id": "q",
+      "testo": "Vettore del nuovo file",
+      "tipo": "store",
+      "codice": "classico()"
+     },
+     {
+      "id": "sim",
+      "testo": "Coseno con ogni|documento archiviato",
+      "tipo": "step",
+      "codice": "punteggi_classici()"
+     },
+     {
+      "id": "dup",
+      "testo": "Scarta quelli ≥ 0,98|sono lo stesso documento",
+      "tipo": "step",
+      "codice": "punteggi_classici()"
+     },
+     {
+      "id": "knn",
+      "testo": "Per cartella: somma|dei 5 più simili",
+      "tipo": "step",
+      "codice": "punteggi_classici()"
+     },
+     {
+      "id": "cen",
+      "testo": "Per cartella: somiglianza|media con tutti i suoi file",
+      "tipo": "step",
+      "codice": "punteggi_classici()"
+     },
+     {
+      "id": "pun",
+      "testo": "Punteggio = kNN/max|+ centroide/max",
+      "tipo": "step",
+      "codice": "classico()"
+     },
+     {
+      "id": "conf",
+      "testo": "Confidenza = (1° − 2°) / 1°|2° = cartella non imparentata;|0 se il più simile sta altrove",
+      "tipo": "step",
+      "codice": "classico()"
+     },
+     {
+      "id": "so",
+      "testo": "Confidenza?",
+      "tipo": "dec",
+      "codice": "SOGLIA_AUTO"
+     },
+     {
+      "id": "al",
+      "testo": "≥ 0,7: alta|--go-ocr la sposta",
+      "tipo": "ok",
+      "codice": "SOGLIA_AUTO = 0.7"
+     },
+     {
+      "id": "me",
+      "testo": "0,4–0,7: media|non si sposta da sola",
+      "tipo": "prop",
+      "codice": "SOGLIA_CLASSICO = 0.4"
+     },
+     {
+      "id": "ba",
+      "testo": "< 0,4: passa al|modello locale",
+      "tipo": "step",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "q",
+      "sim"
+     ],
+     [
+      "sim",
+      "dup"
+     ],
+     [
+      "dup",
+      "knn"
+     ],
+     [
+      "dup",
+      "cen"
+     ],
+     [
+      "knn",
+      "pun"
+     ],
+     [
+      "cen",
+      "pun"
+     ],
+     [
+      "pun",
+      "conf"
+     ],
+     [
+      "conf",
+      "so"
+     ],
+     [
+      "so",
+      "al",
+      "≥ 0,7"
+     ],
+     [
+      "so",
+      "me",
+      "0,4–0,7"
+     ],
+     [
+      "so",
+      "ba",
+      "< 0,4"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    520,
+    300,
+    80
+   ]
+  },
+  {
+   "id": "r_prop_alta",
+   "testo": "PROPOSTA ?|confidenza = distacco dalla 2ª|cartella: ≥0,7 alta · 0,4–0,7 media",
+   "tipo": "prop",
+   "codice": "r[\"via\"]=\"simili\"",
+   "interno": {
+    "titolo": "PROPOSTA dai documenti simili",
+    "nodi": [
+     {
+      "id": "cl",
+      "testo": "Cartella con il punteggio|più alto",
+      "tipo": "step",
+      "codice": "classico()"
+     },
+     {
+      "id": "cf",
+      "testo": "Confidenza",
+      "tipo": "dec",
+      "codice": "SOGLIA_AUTO"
+     },
+     {
+      "id": "al",
+      "testo": "≥ 0,7: proposta senza dubbio|--go-ocr la sposta",
+      "tipo": "ok",
+      "codice": "r['incerto'] = False"
+     },
+     {
+      "id": "me",
+      "testo": "0,4–0,7: proposta incerta|resta da controllare",
+      "tipo": "prop",
+      "codice": "r['incerto'] = True"
+     },
+     {
+      "id": "nm",
+      "testo": "Passo 6|propone il nome",
+      "tipo": "step",
+      "codice": "nuovo_nome()"
+     }
+    ],
+    "archi": [
+     [
+      "cl",
+      "cf"
+     ],
+     [
+      "cf",
+      "al",
+      "≥ 0,7"
+     ],
+     [
+      "cf",
+      "me",
+      "0,4–0,7"
+     ],
+     [
+      "al",
+      "nm"
+     ],
+     [
+      "me",
+      "nm"
+     ]
+    ]
+   },
+   "pos": [
+    800,
+    520,
+    280,
+    80
+   ]
+  },
+  {
+   "id": "indice",
+   "testo": "_indice.txt|elenco e descrizione|di ogni cartella",
+   "tipo": "store",
+   "codice": "descrizioni(), leggi_indice()",
+   "interno": {
+    "titolo": "_indice.txt",
+    "nodi": [
+     {
+      "id": "file",
+      "testo": "_indice.txt|nella radice dell'archivio",
+      "tipo": "store",
+      "codice": "INDICE"
+     },
+     {
+      "id": "ri",
+      "testo": "Righe «cartella = descrizione»|con marcatore [auto N]",
+      "tipo": "step",
+      "codice": "leggi_indice()"
+     },
+     {
+      "id": "sti",
+      "testo": "Riga _stile|regola dei nomi",
+      "tipo": "step",
+      "codice": "stile()"
+     },
+     {
+      "id": "le",
+      "testo": "descrizioni()|toglie i marcatori",
+      "tipo": "step",
+      "codice": "descrizioni()"
+     },
+     {
+      "id": "u1",
+      "testo": "Passo 5: prompt del modello",
+      "tipo": "ai",
+      "codice": "decidi_llm()"
+     },
+     {
+      "id": "u2",
+      "testo": "Correzione a parole|contesto del modello",
+      "tipo": "ai",
+      "codice": "istruzione()"
+     },
+     {
+      "id": "ck",
+      "testo": "controlla_indice()|cartelle mancanti o orfane",
+      "tipo": "dec",
+      "codice": "controlla_indice()"
+     },
+     {
+      "id": "pv",
+      "testo": "_indice.txt.prev|copia di sicurezza",
+      "tipo": "store",
+      "codice": "scrivi_riga()"
+     }
+    ],
+    "archi": [
+     [
+      "file",
+      "ri"
+     ],
+     [
+      "file",
+      "sti"
+     ],
+     [
+      "ri",
+      "le"
+     ],
+     [
+      "sti",
+      "le"
+     ],
+     [
+      "le",
+      "u1"
+     ],
+     [
+      "le",
+      "u2"
+     ],
+     [
+      "file",
+      "ck"
+     ],
+     [
+      "ck",
+      "pv"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    640,
+    260,
+    90
+   ]
+  },
+  {
+   "id": "s5_modello",
+   "testo": "5. Modello locale|qwen3:8b sceglie tra|le cartelle dell'elenco",
+   "tipo": "ai",
+   "codice": "decidi_llm(), LLM, llm()",
+   "interno": {
+    "titolo": "5. Il modello locale sceglie",
+    "nodi": [
+     {
+      "id": "in",
+      "testo": "Testo del documento|primi 2500 caratteri",
+      "tipo": "store",
+      "codice": "decidi_llm()"
+     },
+     {
+      "id": "de",
+      "testo": "Descrizioni delle cartelle|candidate: 8 migliori e i padri",
+      "tipo": "store",
+      "codice": "decidi_llm()"
+     },
+     {
+      "id": "si",
+      "testo": "Documenti simili|e le loro cartelle",
+      "tipo": "store",
+      "codice": "vicini()"
+     },
+     {
+      "id": "pr",
+      "testo": "Prompt, temperatura 0,|senza ragionamento",
+      "tipo": "step",
+      "codice": "llm()"
+     },
+     {
+      "id": "sc",
+      "testo": "Risposta JSON vincolata:|cartella dell'elenco o NUOVA",
+      "tipo": "ai",
+      "codice": "decidi_llm()"
+     },
+     {
+      "id": "va",
+      "testo": "Controlli: la cartella esiste?|NUOVA: padre ok, nome non generico",
+      "tipo": "dec",
+      "codice": "decidi_llm()"
+     },
+     {
+      "id": "es",
+      "testo": "ESISTE|con la cartella",
+      "tipo": "prop",
+      "codice": ""
+     },
+     {
+      "id": "nu",
+      "testo": "NUOVA|padre e nome nuovo",
+      "tipo": "prop",
+      "codice": ""
+     },
+     {
+      "id": "no",
+      "testo": "Scartata|nessuna decisione",
+      "tipo": "store",
+      "codice": ""
+     },
+     {
+      "id": "du",
+      "testo": "Se i simili stanno altrove:|DUBBIO",
+      "tipo": "prop",
+      "codice": "r['dubbio']"
+     }
+    ],
+    "archi": [
+     [
+      "in",
+      "pr"
+     ],
+     [
+      "de",
+      "pr"
+     ],
+     [
+      "si",
+      "pr"
+     ],
+     [
+      "pr",
+      "sc"
+     ],
+     [
+      "sc",
+      "va"
+     ],
+     [
+      "va",
+      "es",
+      "valida"
+     ],
+     [
+      "va",
+      "nu",
+      "NUOVA valida"
+     ],
+     [
+      "va",
+      "no",
+      "non valida"
+     ],
+     [
+      "es",
+      "du"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    640,
+    300,
+    90
+   ]
+  },
+  {
+   "id": "r_prop_incerta",
+   "testo": "PROPOSTA ? incerta|mai spostata da sola|o propone una cartella nuova",
+   "tipo": "prop",
+   "codice": "r[\"via\"]=\"llm\", r[\"incerto\"]",
+   "interno": {
+    "titolo": "PROPOSTA dal modello",
+    "nodi": [
+     {
+      "id": "es",
+      "testo": "Cartella esistente|scelta dal modello",
+      "tipo": "prop",
+      "codice": "decidi_llm()"
+     },
+     {
+      "id": "nu",
+      "testo": "Cartella nuova ✚|nome proposto dal modello",
+      "tipo": "prop",
+      "codice": "decidi_llm()"
+     },
+     {
+      "id": "in",
+      "testo": "Sempre incerta: decide solo|dove il testo non basta",
+      "tipo": "step",
+      "codice": "r['incerto'] = True"
+     },
+     {
+      "id": "du",
+      "testo": "Se i simili stanno altrove:|DUBBIO",
+      "tipo": "prop",
+      "codice": "r['dubbio']"
+     },
+     {
+      "id": "mv",
+      "testo": "Mai spostata da --go-ocr:|la sposti tu dalla pagina",
+      "tipo": "actor",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "es",
+      "in"
+     ],
+     [
+      "in",
+      "du"
+     ],
+     [
+      "in",
+      "mv"
+     ],
+     [
+      "nu",
+      "mv"
+     ]
+    ]
+   },
+   "pos": [
+    800,
+    640,
+    280,
+    90
+   ]
+  },
+  {
+   "id": "conserva",
+   "testo": "_conserva.txt|cartelle e nomi che|tengono il nome originale",
+   "tipo": "store",
+   "codice": "conserva()",
+   "interno": {
+    "titolo": "_conserva.txt: nomi da non toccare",
+    "nodi": [
+     {
+      "id": "file",
+      "testo": "_conserva.txt",
+      "tipo": "store",
+      "codice": "CONSERVA"
+     },
+     {
+      "id": "r1",
+      "testo": "Riga con una cartella|vale anche per le sottocartelle",
+      "tipo": "step",
+      "codice": "conserva()"
+     },
+     {
+      "id": "r2",
+      "testo": "Riga «nome: *modello*»|corrisponde al nome del file",
+      "tipo": "step",
+      "codice": "conserva()"
+     },
+     {
+      "id": "ch",
+      "testo": "Il file va in una cartella|elencata o ha quel nome?",
+      "tipo": "dec",
+      "codice": "conserva()"
+     },
+     {
+      "id": "or",
+      "testo": "Tiene il nome originale|nessuna regola, nessun modello",
+      "tipo": "ok",
+      "codice": "decidi_file()"
+     },
+     {
+      "id": "no",
+      "testo": "Passo 6 normale",
+      "tipo": "step",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "file",
+      "r1"
+     ],
+     [
+      "file",
+      "r2"
+     ],
+     [
+      "r1",
+      "ch"
+     ],
+     [
+      "r2",
+      "ch"
+     ],
+     [
+      "ch",
+      "or",
+      "sì"
+     ],
+     [
+      "ch",
+      "no",
+      "no"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    770,
+    260,
+    90
+   ]
+  },
+  {
+   "id": "s6_nome",
+   "testo": "6. Propone il nome|data dal testo, stile|AAAA_MM_GG - Descrizione",
+   "tipo": "step",
+   "codice": "nuovo_nome(), nome_llm(), data_documento()",
+   "interno": {
+    "titolo": "6. Il nome del file",
+    "nodi": [
+     {
+      "id": "d",
+      "testo": "Cartella decisa",
+      "tipo": "store",
+      "codice": ""
+     },
+     {
+      "id": "co",
+      "testo": "conserva()?",
+      "tipo": "dec",
+      "codice": "conserva()"
+     },
+     {
+      "id": "or",
+      "testo": "Nome originale",
+      "tipo": "ok",
+      "codice": ""
+     },
+     {
+      "id": "mo",
+      "testo": "La cartella ha un modello|fisso e l'anno si trova?",
+      "tipo": "dec",
+      "codice": "nuovo_nome()"
+     },
+     {
+      "id": "fi",
+      "testo": "nuovo_nome(): anno, mese,|persona dal nome o dall'OCR",
+      "tipo": "step",
+      "codice": "nuovo_nome(), MODELLI"
+     },
+     {
+      "id": "ll",
+      "testo": "nome_llm(): il modello|scrive solo la descrizione",
+      "tipo": "ai",
+      "codice": "nome_llm()"
+     },
+     {
+      "id": "da",
+      "testo": "data_documento(): una data = certa;|più date: sceglie il modello solo|se concorda con l'euristica",
+      "tipo": "step",
+      "codice": "data_documento()"
+     },
+     {
+      "id": "pu",
+      "testo": "Pulizia: lunghezza, niente /,|estensione originale",
+      "tipo": "step",
+      "codice": "_nome_pulito()"
+     },
+     {
+      "id": "fn",
+      "testo": "Nome finale|AAAA_MM_GG - Descrizione",
+      "tipo": "ok",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "d",
+      "co"
+     ],
+     [
+      "co",
+      "or",
+      "sì"
+     ],
+     [
+      "co",
+      "mo",
+      "no"
+     ],
+     [
+      "mo",
+      "fi",
+      "sì"
+     ],
+     [
+      "mo",
+      "ll",
+      "no"
+     ],
+     [
+      "ll",
+      "da"
+     ],
+     [
+      "fi",
+      "pu"
+     ],
+     [
+      "da",
+      "pu"
+     ],
+     [
+      "pu",
+      "fn"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    770,
+    300,
+    90
+   ]
+  },
+  {
+   "id": "gui",
+   "testo": "Tu decidi nella pagina web|anteprima PDF · spunta i file|«Correggi…»: scrivi dove|metterlo e come chiamarlo",
+   "tipo": "actor",
+   "codice": "archivio-ui, scheda «Da smistare»",
+   "interno": {
+    "titolo": "La pagina web",
+    "nodi": [
+     {
+      "id": "srv",
+      "testo": "archivio-ui|solo 127.0.0.1, con token",
+      "tipo": "store",
+      "codice": "archivio-ui"
+     },
+     {
+      "id": "t1",
+      "testo": "Da smistare|anteprima, selezione, sposta",
+      "tipo": "step",
+      "codice": "archivio-ui"
+     },
+     {
+      "id": "t2",
+      "testo": "Ordine dell'archivio|igiene e correzioni",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "t3",
+      "testo": "Cerca|ricerca nel testo",
+      "tipo": "step",
+      "codice": "recollq"
+     },
+     {
+      "id": "t4",
+      "testo": "Backup|esiti e copie",
+      "tipo": "step",
+      "codice": "archivio-backup"
+     },
+     {
+      "id": "t5",
+      "testo": "Pipeline|questo schema e le note",
+      "tipo": "step",
+      "codice": "pipeline/"
+     },
+     {
+      "id": "t6",
+      "testo": "Indice|aggiorna le descrizioni",
+      "tipo": "step",
+      "codice": "manutieni_indice()"
+     }
+    ],
+    "archi": [
+     [
+      "srv",
+      "t1"
+     ],
+     [
+      "srv",
+      "t2"
+     ],
+     [
+      "srv",
+      "t3"
+     ],
+     [
+      "srv",
+      "t4"
+     ],
+     [
+      "srv",
+      "t5"
+     ],
+     [
+      "srv",
+      "t6"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    910,
+    300,
+    110
+   ]
+  },
+  {
+   "id": "correzione",
+   "testo": "Correzione a parole|il modello legge la frase e propone|cartella, nome e regole da|ricordare in _regole/_conserva",
+   "tipo": "ai",
+   "codice": "istruzione(), _regole_proposte(), aggiungi_regola()",
+   "interno": {
+    "titolo": "Correzione a parole",
+    "nodi": [
+     {
+      "id": "fr",
+      "testo": "La tua frase",
+      "tipo": "actor",
+      "codice": ""
+     },
+     {
+      "id": "cx",
+      "testo": "Contesto: descrizioni, testo|(3000 caratteri), stile, date",
+      "tipo": "store",
+      "codice": "istruzione()"
+     },
+     {
+      "id": "ll",
+      "testo": "Modello locale|JSON: cartella, nome, regole",
+      "tipo": "ai",
+      "codice": "istruzione()"
+     },
+     {
+      "id": "va",
+      "testo": "Controlli: cartella valida,|nome ripulito, estensione",
+      "tipo": "dec",
+      "codice": "_cartella_valida(), _nome_pulito()"
+     },
+     {
+      "id": "rg",
+      "testo": "_regole_proposte(): regex valida,|riconosce questo file, non doppia",
+      "tipo": "step",
+      "codice": "_regole_proposte()"
+     },
+     {
+      "id": "pr",
+      "testo": "Proposta con caselle per|le regole da ricordare",
+      "tipo": "prop",
+      "codice": "archivio-ui"
+     },
+     {
+      "id": "ok",
+      "testo": "Sposta: scrive le regole spuntate|poi sposta il file",
+      "tipo": "ok",
+      "codice": "aggiungi_regola(), sposta_uno()"
+     },
+     {
+      "id": "fl",
+      "testo": "_regole.txt · _conserva.txt|con copia .prev",
+      "tipo": "store",
+      "codice": "aggiungi_regola()"
+     }
+    ],
+    "archi": [
+     [
+      "fr",
+      "ll"
+     ],
+     [
+      "cx",
+      "ll"
+     ],
+     [
+      "ll",
+      "va"
+     ],
+     [
+      "ll",
+      "rg"
+     ],
+     [
+      "va",
+      "pr"
+     ],
+     [
+      "rg",
+      "pr"
+     ],
+     [
+      "pr",
+      "ok"
+     ],
+     [
+      "ok",
+      "fl"
+     ]
+    ]
+   },
+   "pos": [
+    800,
+    910,
+    280,
+    110
+   ]
+  },
+  {
+   "id": "resta",
+   "testo": "Il file resta in INBOX",
+   "tipo": "store",
+   "codice": "(nessuna azione)",
+   "interno": {
+    "titolo": "Il file resta in INBOX",
+    "nodi": [
+     {
+      "id": "f",
+      "testo": "File in INBOX",
+      "tipo": "store",
+      "codice": ""
+     },
+     {
+      "id": "n",
+      "testo": "Nessuna azione",
+      "tipo": "step",
+      "codice": ""
+     },
+     {
+      "id": "p",
+      "testo": "Al prossimo controllo|ricompare nell'elenco",
+      "tipo": "step",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "f",
+      "n"
+     ],
+     [
+      "n",
+      "p"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    1060,
+    260,
+    70
+   ]
+  },
+  {
+   "id": "sposta",
+   "testo": "Premi «Sposta»?",
+   "tipo": "dec",
+   "codice": "sposta_uno(), --go / --go-ocr",
+   "interno": {
+    "titolo": "Sposta il file",
+    "nodi": [
+     {
+      "id": "in",
+      "testo": "Nome, cartella,|nuovo nome",
+      "tipo": "store",
+      "codice": "sposta_uno()"
+     },
+     {
+      "id": "ba",
+      "testo": "Da terminale:|--go e --go-ocr, a gruppi",
+      "tipo": "store",
+      "codice": "main()"
+     },
+     {
+      "id": "ck",
+      "testo": "Controlli: file in INBOX,|cartella valida, nome pulito",
+      "tipo": "dec",
+      "codice": "sposta_uno()"
+     },
+     {
+      "id": "mk",
+      "testo": "Crea la cartella|se è nuova",
+      "tipo": "step",
+      "codice": "sposta_uno()"
+     },
+     {
+      "id": "li",
+      "testo": "libero(): se il nome esiste|aggiunge - (2)",
+      "tipo": "step",
+      "codice": "libero()"
+     },
+     {
+      "id": "mv",
+      "testo": "shutil.move",
+      "tipo": "ok",
+      "codice": "sposta_uno()"
+     }
+    ],
+    "archi": [
+     [
+      "in",
+      "ck"
+     ],
+     [
+      "ba",
+      "ck"
+     ],
+     [
+      "ck",
+      "mk"
+     ],
+     [
+      "mk",
+      "li"
+     ],
+     [
+      "li",
+      "mv"
+     ]
+    ]
+   },
+   "pos": [
+    400,
+    1060,
+    300,
+    70
+   ]
+  },
+  {
+   "id": "cartelle",
+   "testo": "Cartelle dell'Archivio|01_health · 03_ISEE · 05_Fatture · …",
+   "tipo": "store",
+   "codice": "ARCH",
+   "interno": {
+    "titolo": "Le cartelle dell'archivio",
+    "nodi": [
+     {
+      "id": "ar",
+      "testo": "/mnt/router-usb/Archivio",
+      "tipo": "store",
+      "codice": "ARCH"
+     },
+     {
+      "id": "lv",
+      "testo": "Fino a 3 livelli|cartelle()",
+      "tipo": "step",
+      "codice": "cartelle()"
+     },
+     {
+      "id": "es",
+      "testo": "Escluse: 00_INBOX|e il cestino",
+      "tipo": "step",
+      "codice": "cartelle()"
+     },
+     {
+      "id": "fi",
+      "testo": "File: PDF, JPG, PNG",
+      "tipo": "store",
+      "codice": "trova_file()"
+     },
+     {
+      "id": "us",
+      "testo": "Usate da: passi 4 e 5,|igiene, ricerca, backup",
+      "tipo": "store",
+      "codice": ""
+     }
+    ],
+    "archi": [
+     [
+      "ar",
+      "lv"
+     ],
+     [
+      "lv",
+      "es"
+     ],
+     [
+      "es",
+      "fi"
+     ],
+     [
+      "fi",
+      "us"
+     ]
+    ]
+   },
+   "pos": [
+    300,
+    1190,
+    500,
+    80
+   ]
+  },
+  {
+   "id": "ricerca",
+   "testo": "Ricerca nel testo|recoll + OCR, ogni settimana|scheda «Cerca»",
+   "tipo": "step",
+   "codice": "archivio-index, recoll",
+   "auto": true,
+   "interno": {
+    "titolo": "Ricerca nel testo",
+    "nodi": [
+     {
+      "id": "tm",
+      "testo": "Timer ogni settimana",
+      "tipo": "step",
+      "codice": "archivio-index.timer"
+     },
+     {
+      "id": "g",
+      "testo": "Guardia: almeno 10 file visibili|share montata?",
+      "tipo": "dec",
+      "codice": "archivio-index"
+     },
+     {
+      "id": "ix",
+      "testo": "recollindex: file nuovi|o spostati, per percorso",
+      "tipo": "step",
+      "codice": "recollindex"
+     },
+     {
+      "id": "oc",
+      "testo": "OCR tesseract ita|cache in ~/.cache/recoll",
+      "tipo": "step",
+      "codice": "~/.recoll/recoll.conf"
+     },
+     {
+      "id": "db",
+      "testo": "Indice Xapian|esclusi i file .txt",
+      "tipo": "store",
+      "codice": "skippedNames"
+     },
+     {
+      "id": "q",
+      "testo": "Scheda Cerca: recollq|più parole = tutte presenti",
+      "tipo": "step",
+      "codice": "archivio-ui"
+     },
+     {
+      "id": "fl",
+      "testo": "Segna i file non più|al loro posto",
+      "tipo": "step",
+      "codice": "archivio-ui"
+     },
+     {
+      "id": "pv",
+      "testo": "Anteprima del PDF",
+      "tipo": "step",
+      "codice": "/api/file"
+     }
+    ],
+    "archi": [
+     [
+      "tm",
+      "g"
+     ],
+     [
+      "g",
+      "ix",
+      "ok"
+     ],
+     [
+      "ix",
+      "oc"
+     ],
+     [
+      "oc",
+      "db"
+     ],
+     [
+      "db",
+      "q"
+     ],
+     [
+      "q",
+      "fl"
+     ],
+     [
+      "fl",
+      "pv"
+     ]
+    ]
+   },
+   "pos": [
+    40,
+    1340,
+    250,
+    100
+   ]
+  },
+  {
+   "id": "backup",
+   "testo": "Backup Borg|ogni giorno|copia sicura sul router",
+   "tipo": "step",
+   "codice": "archivio-backup",
+   "auto": true,
+   "interno": {
+    "titolo": "Backup Borg",
+    "nodi": [
+     {
+      "id": "tm",
+      "testo": "Timer ogni giorno",
+      "tipo": "step",
+      "codice": "archivio-backup.timer"
+     },
+     {
+      "id": "s1",
+      "testo": "Share raggiungibile?",
+      "tipo": "dec",
+      "codice": "archivio-backup"
+     },
+     {
+      "id": "se",
+      "testo": "Sentinella: file vuoti e|dimensione vs ultimo stato sano",
+      "tipo": "dec",
+      "codice": "archivio-backup"
+     },
+     {
+      "id": "bc",
+      "testo": "borg create",
+      "tipo": "step",
+      "codice": "archivio-backup"
+     },
+     {
+      "id": "pr",
+      "testo": "prune: 7 giorni, 4 settimane,|12 mesi, poi compact",
+      "tipo": "step",
+      "codice": "archivio-backup"
+     },
+     {
+      "id": "ck",
+      "testo": "borg check|il 1° del mese: --verify-data",
+      "tipo": "step",
+      "codice": "archivio-backup"
+     },
+     {
+      "id": "st",
+      "testo": "Aggiorna lo stato sano",
+      "tipo": "store",
+      "codice": "archivio-backup.state"
+     },
+     {
+      "id": "mi",
+      "testo": "Copia sulla chiavetta grande|se collegata (rsync)",
+      "tipo": "step",
+      "codice": "archivio-backup"
+     },
+     {
+      "id": "ok",
+      "testo": "Log OK + notifica",
+      "tipo": "ok",
+      "codice": "registra()"
+     },
+     {
+      "id": "ko",
+      "testo": "Log FALLITO + notifica critica",
+      "tipo": "prop",
+      "codice": "fail()"
+     }
+    ],
+    "archi": [
+     [
+      "tm",
+      "s1"
+     ],
+     [
+      "s1",
+      "se",
+      "sì"
+     ],
+     [
+      "s1",
+      "ko",
+      "no"
+     ],
+     [
+      "se",
+      "bc",
+      "ok"
+     ],
+     [
+      "se",
+      "ko",
+      "peggiorato"
+     ],
+     [
+      "bc",
+      "pr"
+     ],
+     [
+      "pr",
+      "ck"
+     ],
+     [
+      "ck",
+      "st"
+     ],
+     [
+      "ck",
+      "ko",
+      "corrotto"
+     ],
+     [
+      "st",
+      "mi"
+     ],
+     [
+      "mi",
+      "ok"
+     ]
+    ]
+   },
+   "pos": [
+    320,
+    1340,
+    250,
+    100
+   ]
+  },
+  {
+   "id": "igiene",
+   "testo": "Igiene dell'archivio|suggerisce come riordinare|applichi solo ciò che spunti",
+   "tipo": "step",
+   "codice": "igiene(), azioni_igiene()",
+   "interno": {
+    "titolo": "Igiene dell'archivio",
+    "nodi": [
+     {
+      "id": "sc",
+      "testo": "Scorre cartelle e file",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "c1",
+      "testo": "Cartelle con nome di file",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "c2",
+      "testo": "Contenitori con file diretti|e almeno 2 sottocartelle",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "c3",
+      "testo": "Nomi vaghi",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "c4",
+      "testo": "Rami diversi con contenuto|simile (coseno ≥ 0,5)",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "c5",
+      "testo": "Nomi file fuori stile|data davanti",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "c6",
+      "testo": "Doppia estensione, cartelle|vuote, regole orfane",
+      "tipo": "step",
+      "codice": "igiene()"
+     },
+     {
+      "id": "rp",
+      "testo": "Report a video|solo nomi e conteggi",
+      "tipo": "ok",
+      "codice": "igiene()"
+     },
+     {
+      "id": "az",
+      "testo": "Azioni eseguibili:|doppia estensione, vuote",
+      "tipo": "ai",
+      "codice": "azioni_igiene()"
+     },
+     {
+      "id": "ap",
+      "testo": "Applichi solo quelle spuntate|per id",
+      "tipo": "actor",
+      "codice": "applica_igiene()"
+     }
+    ],
+    "archi": [
+     [
+      "sc",
+      "c1"
+     ],
+     [
+      "sc",
+      "c2"
+     ],
+     [
+      "sc",
+      "c3"
+     ],
+     [
+      "sc",
+      "c4"
+     ],
+     [
+      "sc",
+      "c5"
+     ],
+     [
+      "sc",
+      "c6"
+     ],
+     [
+      "c1",
+      "rp"
+     ],
+     [
+      "c2",
+      "rp"
+     ],
+     [
+      "c3",
+      "rp"
+     ],
+     [
+      "c4",
+      "rp"
+     ],
+     [
+      "c5",
+      "rp"
+     ],
+     [
+      "c6",
+      "rp"
+     ],
+     [
+      "c6",
+      "az"
+     ],
+     [
+      "az",
+      "ap"
+     ]
+    ]
+   },
+   "pos": [
+    600,
+    1340,
+    250,
+    100
+   ]
+  },
+  {
+   "id": "aggiorna_indice",
+   "testo": "Aggiorna l'indice|il modello riscrive le|descrizioni delle cartelle",
+   "tipo": "ai",
+   "codice": "manutieni_indice()",
+   "interno": {
+    "titolo": "Aggiorna l'indice",
+    "nodi": [
+     {
+      "id": "gd",
+      "testo": "Guardie: almeno 10 cartelle,|stop se > 50% orfane",
+      "tipo": "dec",
+      "codice": "manutieni_indice()"
+     },
+     {
+      "id": "bk",
+      "testo": "Copia _indice.txt.prev",
+      "tipo": "step",
+      "codice": "manutieni_indice()"
+     },
+     {
+      "id": "df",
+      "testo": "Per ogni cartella: nuova,|cambiata o da rigenerare",
+      "tipo": "step",
+      "codice": "manutieni_indice()"
+     },
+     {
+      "id": "ds",
+      "testo": "descrivi_cartella():|il modello scrive una riga",
+      "tipo": "ai",
+      "codice": "descrivi_cartella()"
+     },
+     {
+      "id": "vf",
+      "testo": "verifica_descrizione():|controllo con i file",
+      "tipo": "ai",
+      "codice": "verifica_descrizione()"
+     },
+     {
+      "id": "wr",
+      "testo": "scrivi_riga(): rilegge e|annulla se la riga non torna",
+      "tipo": "step",
+      "codice": "scrivi_riga()"
+     },
+     {
+      "id": "po",
+      "testo": "Toglie le righe di|cartelle inesistenti",
+      "tipo": "step",
+      "codice": "manutieni_indice()"
+     },
+     {
+      "id": "mk",
+      "testo": "Marcatore [auto N]|con ? se non verificata",
+      "tipo": "store",
+      "codice": "manutieni_indice()"
+     }
+    ],
+    "archi": [
+     [
+      "gd",
+      "bk"
+     ],
+     [
+      "bk",
+      "df"
+     ],
+     [
+      "df",
+      "ds"
+     ],
+     [
+      "ds",
+      "vf"
+     ],
+     [
+      "vf",
+      "wr"
+     ],
+     [
+      "wr",
+      "mk"
+     ],
+     [
+      "df",
+      "po"
+     ]
+    ]
+   },
+   "pos": [
+    880,
+    1340,
+    250,
+    100
+   ]
+  }
+ ],
+ "archi": [
+  [
+   "tu",
+   "inbox"
+  ],
+  [
+   "timer",
+   "inbox"
+  ],
+  [
+   "inbox",
+   "s1_nome"
+  ],
+  [
+   "regole_nome",
+   "s1_nome",
+   "confronta"
+  ],
+  [
+   "s1_nome",
+   "r_sicuro",
+   "sì"
+  ],
+  [
+   "s1_nome",
+   "s2_testo",
+   "no"
+  ],
+  [
+   "s2_testo",
+   "cache"
+  ],
+  [
+   "s2_testo",
+   "s3_testo"
+  ],
+  [
+   "regole_testo",
+   "s3_testo",
+   "confronta"
+  ],
+  [
+   "s3_testo",
+   "r_incrociato",
+   "sì"
+  ],
+  [
+   "s3_testo",
+   "s4_simili",
+   "no"
+  ],
+  [
+   "docs_arch",
+   "s4_simili",
+   "confronta"
+  ],
+  [
+   "s4_simili",
+   "r_prop_alta",
+   "sì, molto"
+  ],
+  [
+   "s4_simili",
+   "s5_modello",
+   "poco"
+  ],
+  [
+   "indice",
+   "s5_modello"
+  ],
+  [
+   "s5_modello",
+   "r_prop_incerta"
+  ],
+  [
+   "r_sicuro",
+   "s6_nome"
+  ],
+  [
+   "r_incrociato",
+   "s6_nome"
+  ],
+  [
+   "r_prop_alta",
+   "s6_nome"
+  ],
+  [
+   "r_prop_incerta",
+   "s6_nome"
+  ],
+  [
+   "conserva",
+   "s6_nome"
+  ],
+  [
+   "s6_nome",
+   "gui"
+  ],
+  [
+   "gui",
+   "correzione"
+  ],
+  [
+   "gui",
+   "sposta"
+  ],
+  [
+   "sposta",
+   "resta",
+   "no"
+  ],
+  [
+   "sposta",
+   "cartelle",
+   "sì"
+  ],
+  [
+   "cartelle",
+   "ricerca"
+  ],
+  [
+   "cartelle",
+   "backup"
+  ],
+  [
+   "cartelle",
+   "igiene"
+  ],
+  [
+   "cartelle",
+   "aggiorna_indice"
+  ],
+  [
+   "aggiorna_indice",
+   "indice"
+  ]
+ ]
+}
