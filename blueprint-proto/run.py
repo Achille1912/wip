@@ -26,7 +26,7 @@ def git(*a, cwd=repo, check=True):
 
 def files_of(root):
     """{file: line count} of the project's code files (package markers excluded): module-level changes of a split or a merge."""
-    fs = py_files(root / "src") if (root / "src").is_dir() else code_files(root)
+    fs = code_files(root)  # the same files the blueprint's components are made of
     return {p.relative_to(root).as_posix(): len(p.read_text(encoding="utf-8-sig", errors="replace").splitlines()) for p in fs if p.name != "__init__.py"}
 
 

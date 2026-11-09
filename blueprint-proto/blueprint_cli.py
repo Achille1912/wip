@@ -68,7 +68,8 @@ def main():
         print("code unchanged since the last refresh: using the saved blueprint", flush=True)
 
     data = json.loads((work / "blueprint.js").read_text(encoding="utf-8").removeprefix("const BP = ").removesuffix(";"))
-    ext = ".py,.tf,.yaml,.yml,.sh,.toml" if data["layout"] == "flat" else ".py"  # same as refresh.py's sealing
+    from extract import CODE_EXT
+    ext = ",".join(sorted(CODE_EXT))  # same as refresh.py's sealing
     views = (["pipeline"] if data["pipeline"]["nodes"] else []) + ["struttura"]
     procs, urls, port = [], [], a.port
     for v in views:

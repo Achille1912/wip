@@ -1,46 +1,19 @@
-"""Estrae un blueprint (struttura + pipeline LangGraph) da un repo Python, solo con ast."""
+﻿"""Estrae un blueprint (struttura + pipeline LangGraph) da un repo Python, solo con ast."""
 import ast
 import json
 import os
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 
-SKIP = {"__pycache__", ".git", "resources", "extension", "node_modules", ".terraform", ".venv", "venv", "site-packages", "dist", "build"}
-CODE_EXT = {".py", ".tf", ".yaml", ".yml", ".sh", ".toml"}  # in a flat layout infra is architecture too
+SKIP = {"__pycache__", ".git", "extension", "node_modules", ".terraform", ".venv", "venv", "site-packages", "dist", "build"}
+CODE_EXT = {".py", ".tf", ".yaml", ".yml", ".sh", ".toml", ".bat", ".cmd", ".ps1"}  # infra and scripts are architecture too
 
 
 def py_files(root):
     return [p for p in root.rglob("*.py") if not SKIP & set(p.relative_to(root).parts)]
-
-
-def package_of(path, src):
-    parts = path.relative_to(src).parts
-    return parts[0].removesuffix(".py") if len(parts) > 1 or parts[0] != "__init__.py" else "src"
-
-
-def structure(src):
-    """Nodo = sottopacchetto di src; arco = import src.X (aggregato)."""
-    nodes, edges = {}, Counter()
-    for f in py_files(src):
-        pkg = package_of(f, src)
-        n = nodes.setdefault(pkg, {"id": pkg, "files": 0, "lines": 0})
-        n["files"] += 1
-        text = f.read_text(encoding="utf-8", errors="replace")
-        n["lines"] += text.count("\n") + 1
-        for node in ast.walk(ast.parse(text)):
-            mods = []
-            if isinstance(node, ast.ImportFrom) and node.module:
-                mods = [node.module]
-            elif isinstance(node, ast.Import):
-                mods = [a.name for a in node.names]
-            for m in mods:
-                p = m.split(".")
-                if p[0] == "src" and len(p) > 1 and p[1] != pkg:
-                    edges[(pkg, p[1])] += 1
-    return list(nodes.values()), [{"source": a, "target": b, "weight": w} for (a, b), w in edges.items()]
 
 
 def state_keys(fn):
@@ -99,7 +72,7 @@ def code_files(root):
     out = []
     for dp, dn, fn in os.walk(root):
         dn[:] = sorted(d for d in dn if d not in SKIP and not d.startswith("."))
-        out += [Path(dp) / f for f in sorted(fn) if Path(f).suffix in CODE_EXT]
+        out += [Path(dp) / f for f in sorted(fn) if Path(f).suffix in CODE_EXT or f.startswith("Dockerfile")]
     return out
 
 
@@ -109,12 +82,21 @@ SYSPATH = ("/dev/", "/usr/", "/bin/", "/tmp/", "/etc/", "/var/", "/opt/", "/proc
 
 
 def flat_structure(repo):
-    """Components of a repo without a src/ package: each top-level directory (a deployable or a layer), plus "(root)" for loose files.
+    """Components: each top-level directory (a deployable or a layer), each package under src/ when there is one, and "(root)" for loose files.
     Edges are only what the text proves, each with its evidence: Python imports across components; a component naming another's path;
     identifiers (env vars, config paths) that only 2-3 components share. The LLM later curates and describes them, it never invents one."""
     files = code_files(repo)
     rel = lambda f: f.relative_to(repo).as_posix()
-    comp = lambda f: f.relative_to(repo).parts[0] if len(f.relative_to(repo).parts) > 1 else "(root)"
+
+    def comp(f):
+        p = f.relative_to(repo).parts
+        if len(p) == 1:
+            return "(root)"
+        if p[0] == "src":  # src layout: its packages are the components (src/api/x.py -> api); src/__init__.py and __main__.py join main
+            return "main" if len(p) == 2 and p[1] in ("__init__.py", "__main__.py") else p[1].removesuffix(".py")
+        return p[0]
+
+    target = lambda m: m.split(".")[1] if m.startswith("src.") else m.split(".")[0]  # import src.api.x -> component api
     nodes, text = {}, {}
     for f in files:
         text[f] = f.read_text(encoding="utf-8-sig", errors="replace")
@@ -124,6 +106,7 @@ def flat_structure(repo):
         n["py_lines"] += (text[f].count("\n") + 1) if f.suffix == ".py" else 0
         n["paths"].append(rel(f))
     names = {c for c in nodes if c != "(root)"}
+    dirs = {c for c in names if (repo / c).is_dir() and c != "src"}  # path mentions only make sense for real top-level folders, not words like "api"
     edges = {}  # (source, target) -> edge; one edge per ordered pair, the strongest kind wins (import > mention > shared)
 
     def add(a, b, kind, evidence):
@@ -140,14 +123,19 @@ def flat_structure(repo):
         for node in ast.walk(tree):
             mods = [node.module] if isinstance(node, ast.ImportFrom) and node.module and not node.level else [a.name for a in node.names] if isinstance(node, ast.Import) else []
             for m in mods:
-                if m.split(".")[0] in names and m.split(".")[0] != comp(f):
-                    add(comp(f), m.split(".")[0], "import", [f"{rel(f)} imports {m}"])
+                if target(m) in names and target(m) != comp(f):
+                    add(comp(f), target(m), "import", [f"{rel(f)} imports {m}"])
     for f in files:  # 2. a component names another component's path
-        for b in names - {comp(f)}:
+        for b in dirs - {comp(f)}:
             if re.search(rf"(?<![\w.-]){re.escape(b)}(?![\w-])", text[f]):
                 e = edges.get((comp(f), b))
                 if e is None or e["kind"] == "mention":
                     add(comp(f), b, "mention", [rel(f)])
+    root_files = {f.name for f in files if comp(f) == "(root)"}  # e.g. a script naming docker-compose.yaml uses the root's deployment files
+    for f in files:
+        hits = sorted(n for n in root_files if comp(f) != "(root)" and n in text[f])
+        if hits and (comp(f), "(root)") not in edges:
+            add(comp(f), "(root)", "mention", [f"{rel(f)} names {', '.join(hits[:3])}"])
     users = defaultdict(set)  # 3. identifiers shared by few components
     for f in files:
         for tok in set(ENVVAR.findall(text[f])) | {p for p in CFGPATH.findall(text[f]) if not p.startswith(SYSPATH)}:
@@ -216,18 +204,11 @@ def graph_nodes(repo):
 
 
 def blueprint(repo):
-    """The whole blueprint of a repo. src/ layout (packages under src/, LangGraph in src/pipeline/builder.py): as before.
-    Otherwise (flat layout): components = top-level directories with their evidence, plus any agent graph found in the code."""
+    """The whole blueprint of a repo: components with their evidence (flat_structure, src/ packages included), plus the agent graph:
+    a LangGraph builder in src/pipeline/builder.py (with the state each step reads and writes), otherwise any graph found in the code."""
     repo = Path(repo).resolve()
-    if (repo / "src").is_dir():
-        sn, se = structure(repo / "src")
-        try:
-            pn, pe = pipeline(repo / "src")
-        except Exception:
-            pn, pe = [], []
-        return {"repo": repo.name, "layout": "src", "structure": {"nodes": sn, "edges": se}, "pipeline": {"nodes": pn, "edges": pe}}
     sn, se = flat_structure(repo)
-    pn, pe = graph_nodes(repo)
+    pn, pe = pipeline(repo / "src") if (repo / "src" / "pipeline" / "builder.py").exists() else graph_nodes(repo)
     if len(pn) <= 2:  # only START and END: no graph in this repo
         pn, pe = [], []
     return {"repo": repo.name, "layout": "flat", "structure": {"nodes": sn, "edges": se}, "pipeline": {"nodes": pn, "edges": pe}}
@@ -236,7 +217,7 @@ def blueprint(repo):
 if __name__ == "__main__":
     repo = Path(sys.argv[1]).resolve()
     out = blueprint(repo)
-    # .js e non .json: una pagina aperta da file:// non può fare fetch di un json locale
+    # .js e non .json: una pagina aperta da file:// non puÃ² fare fetch di un json locale
     Path(sys.argv[2]).write_text("const BP = " + json.dumps(out, indent=1) + ";", encoding="utf-8")
     s, p = out["structure"], out["pipeline"]
     print(f"{out['layout']} layout | structure: {len(s['nodes'])} nodi, {len(s['edges'])} archi | pipeline: {len(p['nodes'])} nodi, {len(p['edges'])} archi")

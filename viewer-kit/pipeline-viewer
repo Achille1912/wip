@@ -365,7 +365,7 @@ button.p{background:var(--pb);color:var(--pf);border-color:var(--pb);font-weight
 .u.ai{--cc:var(--c-ai);--cs:var(--s-ai)}.u.store{--cc:var(--c-store);--cs:var(--s-store)}.u.actor{--cc:var(--c-prop);--cs:var(--s-prop)}.u.auto{border-style:dashed}
 .u.L-blu{--cc:var(--c-step);--cs:var(--s-step)}.u.L-verde{--cc:var(--c-ok);--cs:var(--s-ok)}.u.L-viola{--cc:var(--c-ai);--cs:var(--s-ai)}
 .u.L-arancio{--cc:var(--c-prop);--cs:var(--s-prop)}.u.L-giallo{--cc:var(--c-dec);--cs:var(--s-dec)}.u.L-grigio{--cc:var(--c-store);--cs:var(--s-store)}
-.zmid .u p{display:none}.zfar .u p,.zfar .u s,.zfar .u i{display:none}.zfar .u{display:flex;flex-direction:column;justify-content:center}.zfar .u b{font-size:22px;margin:0}  /* semantic zoom */
+.zmid .u p{display:none}.zmid .u{display:flex;flex-direction:column;justify-content:center}.zmid .u b{font-size:18px}.zfar .u p,.zfar .u s,.zfar .u i{display:none}.zfar .u{display:flex;flex-direction:column;justify-content:center}.zfar .u b{font-size:22px;margin:0}  /* semantic zoom */
 #ft{bottom:.75rem;left:50%;transform:translateX(-50%);display:flex;gap:.35rem;padding:.3rem .45rem;font-size:.8rem;max-width:calc(100vw - 22rem);flex-wrap:wrap;justify-content:center}
 #ft button{padding:.15rem .55rem;border-radius:99px;font-size:.8rem}#ft button:not(.on){opacity:.45;text-decoration:line-through}
 .u.ext{background:transparent;border:1.5px dashed var(--mu);box-shadow:none;--cs:var(--mu)}.u.ext p{-webkit-line-clamp:2}
@@ -586,7 +586,7 @@ async function mostra0(){
  else{cy.fit(undefined,96);if(cy.zoom()<.7){const b=cy.elements().boundingBox(),z=.75,W=$("pl").clientWidth;  // vista d'insieme illeggibile: parti dall'inizio del flusso, leggibile ("Adatta" mostra tutto)
   cy.zoom({level:z});cy.pan({x:(b.x2-b.x1)*z<W?W/2-(b.x1+b.x2)/2*z:96-b.x1*z,y:96-b.y1*z})}}
  const fondo=()=>{const z=cy.zoom(),p=cy.pan(),s=$("pl").style;s.backgroundSize=`${24*z}px ${24*z}px`;s.backgroundPosition=`${p.x}px ${p.y}px`};
- const zl=()=>{const z=cy.zoom(),c=$("pl").classList;c.toggle("zfar",z<.5);c.toggle("zmid",z>=.5&&z<.85)};zl();  // semantic zoom: less text the further away
+ const zl=()=>{const z=cy.zoom(),c=$("pl").classList;c.toggle("zfar",z<.5);c.toggle("zmid",z>=.5&&z<.7)};zl();  // semantic zoom: less text the further away; the .75 start view keeps the descriptions
  fondo();cy.on("viewport",()=>{CAMS[vista]={z:cy.zoom(),p:cy.pan()};fondo();zl()});
  cy.on("tap","node,edge",e=>placing()?place(e.position):e.target.hasClass("an")?scegliAn(e.target):scegli(e.target,e.renderedPosition.y));
  cy.on("dragfree","node.an",()=>{clearTimeout(syncT);syncT=setTimeout(annSync,80)});  // moving one or several annotations saves once

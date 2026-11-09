@@ -32,7 +32,8 @@ if data["pipeline"]["nodes"]:
 print("-> to_spec.py", flush=True)
 run("to_spec.py", bp, desc, out, *([det] if data["pipeline"]["nodes"] else []))
 # seal the anchored code as verified: from now on a block turns yellow when its code changes
-ext = ".py,.tf,.yaml,.yml,.sh,.toml" if data["layout"] == "flat" else ".py"
+from extract import CODE_EXT  # noqa: E402
+ext = ",".join(sorted(CODE_EXT))  # ponytail: Dockerfiles have no extension, so the drift check does not watch them
 for name in ("pipeline", "struttura"):
     spec = out / name / "spec.json"
     if spec.exists() and '"ancore"' in spec.read_text(encoding="utf-8"):

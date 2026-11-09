@@ -9,7 +9,7 @@ from describe import LANG, STYLE, ask, project
 
 load = lambda p, pre: json.loads(Path(p).read_text(encoding="utf-8").removeprefix(pre).removesuffix(";"))
 GENERIC = re.compile(r"^(this|the) (directory|folder|component|module|package)\b|^(utility|utilities|helper|misc)\b|\bvarious\b|\bmiscellaneous\b", re.I)
-EXPECTS = {"Build & deploy": {"builds", "deploys"}, "Infrastructure": {"provisions", "deploys"}}  # a component of this layer should have such an outgoing link
+EXPECTS = {"Build & deploy": {"builds", "deploys"}, "Infrastructure": {"provisions", "deploys"}}  # a component of this layer should have such a link
 
 
 def generic(text, name):
@@ -44,9 +44,9 @@ def main(repo, bp_file, desc_file, report_file):
             err.append(f"link {k}: no evidence in the code")
     if bp.get("layout") == "flat":
         warn += [f"component '{n}': no link to anything (orphan)" for n in sorted(names - linked)]
-        for n in names:  # 4. a build/infra component with no matching outgoing link is suspicious
+        for n in names:  # 4. a build/infra component with no matching link is suspicious (either way: infra is often what gets deployed)
             want, layer = EXPECTS.get(desc.get("meta", {}).get(n, {}).get("layer", "")), desc.get("meta", {}).get(n, {}).get("layer")
-            outs = {v.get("type") for k, v in kept.items() if v.get("from", k.split(">")[0]) == n}
+            outs = {v.get("type") for k, v in kept.items() if n in k.split(">")}
             if want and not outs & want:
                 warn.append(f"component '{n}' ({layer}): no {' or '.join(sorted(want))} link found")
     pn = [n["id"] for n in bp["pipeline"]["nodes"] if n["id"] not in ("START", "END")]
