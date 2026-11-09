@@ -1149,7 +1149,9 @@ def main():
         while True:
             time.sleep(2)
             try:
-                if os.stat(src).st_mtime != m0: os.execv(sys.executable, [sys.executable] + sys.argv)
+                if os.stat(src).st_mtime != m0:  # Windows execv joins argv without quoting: an argument with spaces (the --*-cmd ones) would split
+                    av = [sys.executable] + sys.argv
+                    os.execv(sys.executable, [subprocess.list2cmdline([a]) for a in av] if os.name == "nt" else av)
             except OSError: pass
 
     srv = ThreadingHTTPServer(("127.0.0.1", A.port), H)
