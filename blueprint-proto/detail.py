@@ -50,7 +50,8 @@ def phases(bp, desc):
     shape = '{"fasi": [{"id": "f1", "titolo": "...", "descrizione": "1 sentence", "nodi": [ids]}]}'
     d = json_of(ask("Group these pipeline steps into 2-6 consecutive, coherent PHASES (e.g. intake, processing, reporting, closing). "
                     f"Each step belongs to exactly one phase. Reply ONLY with JSON: {shape}. Write titles and descriptions in {LANG}. "
-                    "Use the exact ids.\n\nSteps: " + json.dumps(items, ensure_ascii=False) + "\nLinks: " + json.dumps(edges)))
+                    "Use the exact ids.\n\nSteps: " + json.dumps(items, ensure_ascii=False) + "\nLinks: " + json.dumps(edges),
+                    key=json.dumps(["phases", LANG, nodes, edges])))  # phases follow the graph's shape: a reworded step keeps them (and their colors)
     fasi, seen = [], set()
     for f in d["fasi"]:
         f["nodi"] = [n for n in f["nodi"] if n in nodes and n not in seen]

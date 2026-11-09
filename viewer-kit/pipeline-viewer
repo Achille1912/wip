@@ -1127,6 +1127,7 @@ def main():
                     if r.returncode: return self.j(500, {"errore": (r.stderr or r.stdout).strip()[-300:]})
                     RN.update(ok=None, tail="")
                     set_stato(None, "fatta" if az == "apply" else "aperta", "Applied after review" if az == "apply" else None)
+                    if az == "apply" and A.refresh_cmd: lancia_refresh()  # the code just changed: redraw the blueprint from it
                 return self.j(200, {"ok": True})
             with LOCK:
                 note = leggi_note()

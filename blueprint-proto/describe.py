@@ -24,10 +24,17 @@ _lock = threading.Lock()
 _cache = json.loads(CACHE_FILE.read_text(encoding="utf-8")) if CACHE_FILE.exists() else {}
 
 
-def ask(prompt, tries=2, model="sonnet"):
-    key = hashlib.sha256((prompt if model == "sonnet" else f"{model}\0{prompt}").encode()).hexdigest()  # sonnet keeps the old keys: the cache stays valid
+def ask(prompt, tries=2, model="sonnet", key=None):
+    """key: what the answer really depends on, when the prompt also carries text that may drift (e.g. other nodes' descriptions)."""
+    full = hashlib.sha256((prompt if model == "sonnet" else f"{model}\0{prompt}").encode()).hexdigest()  # sonnet keeps the old keys: the cache stays valid
+    key = hashlib.sha256(f"{model}\0key\0{key}".encode()).hexdigest() if key is not None else full
+    if key not in _cache and full in _cache:  # same prompt answered before under the full-prompt key: reuse it, no call
+        with _lock:
+            _cache[key] = _cache[full]
+            CACHE_FILE.write_text(json.dumps(_cache, ensure_ascii=False), encoding="utf-8")  # saved, so later prompt drift still hits
     if key in _cache:
         return _cache[key]
+    print("   llm:", re.sub(r"\s+", " ", prompt)[:90], file=sys.stderr, flush=True)  # every real call shows in the refresh output
     for _ in range(tries):  # `claude -p` occasionally exits with a transient error
         r = subprocess.run(["claude", "-p", "--model", model, "--output-format", "text"],
                            input=prompt, capture_output=True, text=True, encoding="utf-8", timeout=300)
@@ -126,7 +133,8 @@ def describe_edges(edges, node_desc):
               f"travels, but do not quote them. For each item reply in {LANG} with {{\"data\": the pieces of information that pass from the first step "
               "to the second, as a short comma-separated list in plain words (empty string if data_passed is empty), "
               "\"when\": only if 'branch' is set, a short clause completing 'Taken when ...' (otherwise empty string)}. "
-              "Reply ONLY with a JSON object {id: {data, when}}.\n\n" + json.dumps(items, ensure_ascii=False))
+              "Reply ONLY with a JSON object {id: {data, when}}.\n\n" + json.dumps(items, ensure_ascii=False),
+              key=json.dumps(["edges", LANG, [(i["id"], i["data_passed"]) for i in items]]))  # a reworded step description does not redo every link
     return json.JSONDecoder().raw_decode(raw[raw.index("{"):])[0]
 
 
@@ -143,7 +151,8 @@ def curate_links(edges, desc, ctx):
               "(e.g. sibling components that merely follow the same naming convention). For kept items give 'from' (the component that depends on, uses or deploys the other: "
               f"it must be exactly a or b), 'type' (exactly one of {list(LINK_TYPES)}: imports = code imports, builds = builds or packages, deploys = deploys or releases, "
               "provisions = creates infrastructure for, configures = supplies settings or secrets to, calls = invokes at runtime, depends_on = anything else), 'label' (2-3 words) and 'text' (one sentence in {LANG} saying what the relationship is, without quoting the evidence). "
-              'Reply ONLY with a JSON object {id: {"keep": true|false, "from": "...", "type": "...", "label": "...", "text": "..."}}.\n\n' + json.dumps(items, ensure_ascii=False))
+              'Reply ONLY with a JSON object {id: {"keep": true|false, "from": "...", "type": "...", "label": "...", "text": "..."}}.\n\n' + json.dumps(items, ensure_ascii=False),
+              key=json.dumps(["links", LANG, ctx, [(i["id"], i["kind"], i["evidence"]) for i in items]]))  # links change with their evidence, not with a reworded summary
     out = json.JSONDecoder().raw_decode(raw[raw.index("{"):])[0]
     out = {k: v for k, v in out.items() if isinstance(v, dict) and k in {i["id"] for i in items}}
     for v in out.values():  # a type outside the vocabulary is never trusted
