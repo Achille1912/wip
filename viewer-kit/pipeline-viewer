@@ -1108,7 +1108,7 @@ def main():
                         v = verifica(json.load(open(spec_path, encoding="utf-8"))); pf = os.path.join(nota_dir, "run-prompt.txt")
                         with open(pf, "w", encoding="utf-8") as f:
                             f.write(prompt_note(aperte, *(v or (None, None))) + "\n\nApproved architecture plan: the code must end up with exactly this structure and no other structural change:\n" + "\n".join(res["lines"]))
-                        set_stato({n["id"] for n in aperte}, "in lavorazione"); lancia_run(pf)
+                        set_stato({n["id"] for n in aperte}, "in lavorazione"); lancia_run(f'run "{pf}"')
                         return self.j(200, {"ok": True})
                 return self.j(400, {"errore": "invalid action"})
             if self.path == "/api/rules":

@@ -31,7 +31,7 @@ def main(repo, bp_file, desc_file, report_file):
             else:
                 warn.append(f"{kind} '{k}': description is still generic")
     for k, text in desc["nodes"]["structure"].items():  # 2. every component must say what it is made of
-        if not desc.get("meta", {}).get(k, {}).get("tags") and bp.get("layout") == "flat":
+        if not desc.get("meta", {}).get(k, {}).get("tags"):
             warn.append(f"component '{k}': no tags")
     names = {n["id"] for n in bp["structure"]["nodes"]}
     kept = {k: v for k, v in desc["edges"].get("structure", {}).items() if v.get("keep")}
@@ -42,13 +42,12 @@ def main(repo, bp_file, desc_file, report_file):
             err.append(f"link {k}: points to a component that does not exist")
         elif not ev.get(k):
             err.append(f"link {k}: no evidence in the code")
-    if bp.get("layout") == "flat":
-        warn += [f"component '{n}': no link to anything (orphan)" for n in sorted(names - linked)]
-        for n in names:  # 4. a build/infra component with no matching link is suspicious (either way: infra is often what gets deployed)
-            want, layer = EXPECTS.get(desc.get("meta", {}).get(n, {}).get("layer", "")), desc.get("meta", {}).get(n, {}).get("layer")
-            outs = {v.get("type") for k, v in kept.items() if n in k.split(">")}
-            if want and not outs & want:
-                warn.append(f"component '{n}' ({layer}): no {' or '.join(sorted(want))} link found")
+    warn += [f"component '{n}': no link to anything (orphan)" for n in sorted(names - linked)]
+    for n in names:  # 4. a build/infra component with no matching link is suspicious (either way: infra is often what gets deployed)
+        want, layer = EXPECTS.get(desc.get("meta", {}).get(n, {}).get("layer", "")), desc.get("meta", {}).get(n, {}).get("layer")
+        outs = {v.get("type") for k, v in kept.items() if n in k.split(">")}
+        if want and not outs & want:
+            warn.append(f"component '{n}' ({layer}): no {' or '.join(sorted(want))} link found")
     pn = [n["id"] for n in bp["pipeline"]["nodes"] if n["id"] not in ("START", "END")]
     pe = {x for e in bp["pipeline"]["edges"] for x in (e["source"], e["target"])}
     warn += [f"graph node '{n}': not connected" for n in pn if n not in pe]

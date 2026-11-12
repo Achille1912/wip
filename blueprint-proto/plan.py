@@ -8,12 +8,11 @@ from pathlib import Path
 
 from archplan import atom, fmt
 from describe import ask, function_sources
-from extract import blueprint, code_files, py_files
+from extract import blueprint, code_files
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 repo, state, cmd = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve(), sys.argv[3]
-src = repo / "src"
 VOCAB = ('{"op":"add"|"remove","kind":"module","file":"path/to/file.py"}  a code file (Python, Terraform, YAML, shell) created / deleted\n'
          '{"op":"limit","kind":"module_size","file":"path/to/file.py","max_lines":N}  that file must have at most N lines afterwards\n'
          '{"op":"add"|"remove","kind":"package","id":"dir_name"}  a top-level component directory (or package) is created / removed\n'
@@ -38,20 +37,15 @@ def outline(path):
 def facts(targets):
     bp = blueprint(repo)
     sn, se, pn, pe = bp["structure"]["nodes"], bp["structure"]["edges"], bp["pipeline"]["nodes"], bp["pipeline"]["edges"]
-    flat = bp["layout"] == "flat"
-    funcs = function_sources(repo if flat else src)
-    paths = code_files(repo) if flat else py_files(src)
+    funcs = function_sources(repo)
+    paths = code_files(repo)
     sizes = {p.relative_to(repo).as_posix(): len(p.read_text(encoding="utf-8-sig", errors="replace").splitlines()) for p in paths}
     big = [f for f, n in sorted(sizes.items(), key=lambda kv: -kv[1])[:3] if n > 600 and f.endswith(".py")]
     node_src = "\n\n".join(f"Code of {n['id']}:\n" + "\n".join((n.get("snippet") or funcs.get(n.get("function"), "")).splitlines()[:80]) for n in pn if n["id"] in targets)
-    if flat:
-        head = (f"Components (top-level directories): {[(n['id'], n['files'], n['lines']) for n in sn]}\n"
-                f"Links between components (from, to, kind): {[(e['source'], e['target'], e['kind']) for e in se]}\n")
-        if pn:
-            head += f"Agent graph nodes: {[n['id'] for n in pn if n['id'] not in ('START', 'END')]}\nAgent graph flows: {[(e['source'], e['target']) for e in pe]}\n"
-    else:
-        head = (f"Pipeline components: {json.dumps([{k: n.get(k) for k in ('id', 'file', 'reads', 'writes')} for n in pn if n['id'] not in ('START', 'END')])}\n"
-                f"Flows: {[(e['source'], e['target']) for e in pe]}\nPackage dependencies: {[(e['source'], e['target']) for e in se]}\n")
+    head = (f"Components (top-level directories): {[(n['id'], n['files'], n['lines']) for n in sn]}\n"
+            f"Links between components (from, to, kind): {[(e['source'], e['target'], e['kind']) for e in se]}\n")
+    if pn:
+        head += f"Agent graph nodes: {[n['id'] for n in pn if n['id'] not in ('START', 'END')]}\nAgent graph flows: {[(e['source'], e['target']) for e in pe]}\n"
     return (head + f"Largest files: {sorted(sizes.items(), key=lambda kv: -kv[1])[:15]}\n"
             + "".join(f"\nOutline of {f}:\n{outline(repo / f)}\n" for f in big) + ("\n" + node_src if node_src else ""))
 

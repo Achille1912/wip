@@ -72,7 +72,7 @@ def tests_for(files):
     """Test files that are changed, or mention the module of a changed file. ponytail: text match, cap 15; a generic module name over-selects."""
     tests = {f for f in files if re.search(r"(^|/)test[^/]*\.py$", f)}
     stems = [Path(f).stem for f in files if f.endswith(".py") and f not in tests]
-    for t in sorted((wt / "test").rglob("test*.py")) if (wt / "test").is_dir() else []:
+    for t in sorted(t for d in ("test", "tests") if (wt / d).is_dir() for t in (wt / d).rglob("test*.py")):
         text = t.read_text(encoding="utf-8", errors="replace")
         if any(re.search(rf"\b{re.escape(s)}\b", text) for s in stems):
             tests.add(t.relative_to(wt).as_posix())

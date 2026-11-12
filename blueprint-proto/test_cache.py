@@ -3,6 +3,7 @@ import hashlib
 import json
 import tempfile
 import types
+from unittest import mock
 from pathlib import Path
 
 import describe
@@ -15,9 +16,8 @@ def test_structure_keys():
         calls.append(input)
         return types.SimpleNamespace(returncode=0, stdout='{"a->b|": {"data": "x", "when": ""}}', stderr="")
 
-    with tempfile.TemporaryDirectory() as d:
-        describe.CACHE_FILE, describe._cache = Path(d) / "c.json", {}
-        describe.subprocess.run = fake_run
+    with tempfile.TemporaryDirectory() as d, mock.patch.object(describe.subprocess, "run", fake_run), \
+            mock.patch.object(describe, "CACHE_FILE", Path(d) / "c.json"), mock.patch.object(describe, "_cache", {}):
         edges = [{"source": "a", "target": "b", "label": "", "state_keys": ["k"]}]
         describe.describe_edges(edges, {"a": "reads files", "b": "writes a report"})
         describe.describe_edges(edges, {"a": "loads the input files", "b": "writes a report"})  # only a description changed
