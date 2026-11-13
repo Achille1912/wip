@@ -3,6 +3,7 @@ Generated views and state live in blueprint-proto/work/<repo name>/views/<pipeli
 import argparse
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import webbrowser
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+DATA = Path(os.environ.get("BLUEPRINT_DATA", HERE))  # the packaged app sets it: the code folder is read-only there
 VIEWER = HERE.parent / "viewer-kit" / "pipeline-viewer"
 PY = sys.executable
 
@@ -51,11 +53,16 @@ def main():
     ap.add_argument("--refresh", action="store_true", help="rebuild even if the code did not change")
     ap.add_argument("--port", type=int, default=8766, help="first port to try")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--pick", action="store_true", help="choose the repo in a folder dialog, stop from a dialog (the packaged app's double click)")
     a = ap.parse_args()
+    if a.pick:
+        from tkinter import Tk, filedialog
+        Tk().withdraw()
+        a.repo = filedialog.askdirectory(title="Blueprint: choose a repository") or sys.exit("no folder chosen")
     repo = Path(a.repo).resolve()
     if not repo.is_dir():
         sys.exit(f"not a folder: {repo}")
-    work = HERE / "work" / repo.name
+    work = DATA / "work" / repo.name
     out = work / "views"
     stamp = work / "fingerprint.txt"
     fp = fingerprint(repo)
@@ -95,6 +102,10 @@ def main():
         webbrowser.open(urls[0][1])
     print("Ctrl+C stops the viewers", flush=True)
     try:
+        if a.pick:  # no terminal to Ctrl+C when double-clicked: the dialog is the stop button
+            from tkinter import messagebox
+            messagebox.showinfo("Blueprint", f"{repo.name} is open in the browser:\n\n" + "\n".join(u for _, u in urls) + "\n\nOK stops Blueprint.")
+            return
         while True:  # not proc.wait(): a viewer restarts itself (execv) when its file changes, which ends the first process
             time.sleep(1)
     except KeyboardInterrupt:

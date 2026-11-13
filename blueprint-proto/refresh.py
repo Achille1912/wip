@@ -7,11 +7,11 @@ from pathlib import Path
 
 here = Path(__file__).resolve().parent
 repo, out = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
-work = here / "work" / repo.name
+sys.path.insert(0, str(here))
+from blueprint_cli import DATA, fingerprint  # noqa: E402
+work = DATA / "work" / repo.name
 work.mkdir(parents=True, exist_ok=True)
 bp, desc, det = work / "blueprint.js", work / "descriptions.js", work / "detail.json"
-sys.path.insert(0, str(here))
-from blueprint_cli import fingerprint  # noqa: E402
 fp = fingerprint(repo)  # taken before reading the code, written only after a full refresh
 
 

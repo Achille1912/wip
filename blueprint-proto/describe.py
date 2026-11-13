@@ -19,7 +19,7 @@ STYLE = (f"Write in {LANG}, at most 2 short sentences (under 40 words in total),
          "Reply with the description text only.")
 
 # Answers saved by prompt hash: unchanged code = same prompt = no LLM call (incremental refresh).
-CACHE_FILE = Path(__file__).with_name(".llm_cache.json")
+CACHE_FILE = Path(os.environ.get("BLUEPRINT_DATA", Path(__file__).parent)) / ".llm_cache.json"
 _lock = threading.Lock()
 _cache = json.loads(CACHE_FILE.read_text(encoding="utf-8")) if CACHE_FILE.exists() else {}
 

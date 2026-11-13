@@ -12,3 +12,5 @@ brag-output/
 blueprint-proto/blueprint.js
 blueprint-proto/descriptions.js
 blueprint-proto/detail.json
+# packaged app builds and the downloaded runtimes
+dist/

@@ -150,7 +150,7 @@ def prompt_modello(spec_path, root):
             "I blocchi sono i concetti del dominio (non i file), ognuno con almeno un'ancora vera; i sotto-concetti stanno in «interno». "
             "Ogni funzione del progetto deve cadere in un blocco, salvo codice di test o infrastruttura elencato in «infrastruttura». "
             "Una freccia e' ammessa solo se il codice ha una chiamata o un import tra le ancore dei due estremi. "
-            f"Verifica con: python \"{os.path.abspath(__file__)}\" \"{spec_path}\" --root \"{root}\" --check, e ripeti finche' esce con codice 0. "
+            f"Verifica con: \"{sys.executable}\" \"{os.path.abspath(__file__)}\" \"{spec_path}\" --root \"{root}\" --check, e ripeti finche' esce con codice 0. "
             "Non modificare il codice del progetto, solo la spec.")
 
 
