@@ -73,8 +73,7 @@ async def run_agent(prompt, wt, state, model="sonnet"):
         if d.startswith("deny"):
             log.append({"tool": tool, "text": text, "decision": "denied automatically: " + d[6:]})
             return PermissionResultDeny(message=d[6:])
-        first = re.match(r"\s*([\w.\\/:-]+)", text)
-        key = (tool, first.group(1) if tool == "Bash" and first else "")  # "for this run" = this tool, and for Bash this program
+        key = (tool, text if tool == "Bash" else "")  # "for this run" = this tool; for Bash this exact command (granting `python` would grant `python -c ...`)
         if key in granted:
             log.append({"tool": tool, "text": text, "decision": "allowed (granted earlier in this run)"})
             return PermissionResultAllow()

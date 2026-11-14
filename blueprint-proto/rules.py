@@ -6,12 +6,11 @@ import sys
 from pathlib import Path
 
 from describe import ask
-from extract import blueprint, code_files, py_files
+from extract import blueprint, code_files
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 repo, rules_file, cmd = Path(sys.argv[1]).resolve(), Path(sys.argv[2]), sys.argv[3]
-src = repo / "src"
 
 
 def load():
@@ -27,7 +26,7 @@ def facts():
     bp = blueprint(repo)
     return {"packages": [n["id"] for n in bp["structure"]["nodes"]],
             "deps": {(e["source"], e["target"]) for e in bp["structure"]["edges"] if e.get("kind", "import") != "shared"},  # imports and path references
-            "nodes": [n for n in bp["pipeline"]["nodes"] if n["id"] not in ("START", "END")], "flat": bp["layout"] == "flat"}
+            "nodes": [n for n in bp["pipeline"]["nodes"] if n["id"] not in ("START", "END")]}
 
 
 def check(c, f):
@@ -41,7 +40,7 @@ def check(c, f):
         if len(w) > 1:
             v.append({"text": f'"{c["key"]}" is written by {len(w)} components: {", ".join(w)}', "nodes": w})
     elif c["type"] == "max_file_lines":
-        for p in (code_files(repo) if f["flat"] else py_files(src)):
+        for p in code_files(repo):
             n, rel = len(p.read_text(encoding="utf-8-sig", errors="replace").splitlines()), p.relative_to(repo).as_posix()
             if n > c["n"]:
                 v.append({"text": f"{rel} has {n} lines (limit {c['n']})", "nodes": [x["id"] for x in f["nodes"] if x.get("file") == rel]})

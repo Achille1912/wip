@@ -81,13 +81,6 @@ def describe_node(node, funcs, ctx):
     return ask(f"This is a step of a workflow in {ctx}.{extra}\n{STYLE}\n\nCode:\n{code}")
 
 
-def describe_group(node, src, ctx):
-    """A package (or module) under src/: same answer as a flat component, from the repo-relative paths of its files."""
-    repo = src.parent
-    paths = [f.relative_to(repo).as_posix() for f in py_files(src) if f.relative_to(src).parts[0].removesuffix(".py") == node["id"]]
-    return describe_component({**node, "paths": paths, "files": len(paths)}, repo, ctx)
-
-
 def digest(repo, rel):
     """One line about a file of any kind: Python = docstring + top-level names; anything else (Terraform, YAML, shell…) = its first lines."""
     f = Path(repo) / rel
@@ -111,7 +104,7 @@ LAYERS = ("Entry point", "Interface", "Orchestration", "Service", "Library", "Da
 
 
 def describe_component(node, repo, ctx):
-    """A top-level directory of a flat repo, from its file digests and its own README: {summary, layer, tags, files:[{path, role}]}."""
+    """A component (top-level directory or src/ package), from its file digests and its own README: {summary, layer, tags, files:[{path, role}]}."""
     facts = [digest(repo, p) for p in node["paths"][:25]]
     readme = next((p for p in Path(repo, node["id"]).glob("README*") if p.is_file()), None) if node["id"] != "(root)" else None
     if readme:
@@ -167,18 +160,17 @@ def curate_links(edges, desc, ctx):
 if __name__ == "__main__":
     repo = Path(sys.argv[1]).resolve()
     bp = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8").removeprefix("const BP = ").removesuffix(";"))
-    flat, ctx = bp.get("layout") == "flat", project(repo)
-    funcs = function_sources(repo if flat else repo / "src")
+    ctx = project(repo)
+    funcs = function_sources(repo)
     with ThreadPoolExecutor(6) as ex:
         pf = {n["id"]: ex.submit(describe_node, n, funcs, ctx) for n in bp["pipeline"]["nodes"]}
-        sf = {n["id"]: ex.submit(describe_component, n, repo, ctx) if flat else ex.submit(describe_group, n, repo / "src", ctx)
-              for n in bp["structure"]["nodes"] if flat or n["id"] not in ("src", "__main__")}
+        sf = {n["id"]: ex.submit(describe_component, n, repo, ctx) for n in bp["structure"]["nodes"]}
         pipe = {k: f.result() for k, f in pf.items()}
         struct = {k: f.result() for k, f in sf.items()}
     meta = {k: {x: v[x] for x in ("layer", "tags", "files")} for k, v in struct.items() if isinstance(v, dict)}
     struct = {k: v["summary"] if isinstance(v, dict) else v for k, v in struct.items()}
     edges = describe_edges(bp["pipeline"]["edges"], pipe) if bp["pipeline"]["edges"] else {}
-    links = curate_links(bp["structure"]["edges"], struct, ctx) if flat and bp["structure"]["edges"] else {}
+    links = curate_links(bp["structure"]["edges"], struct, ctx) if bp["structure"]["edges"] else {}
     out = {"nodes": {"pipeline": pipe, "structure": struct}, "meta": meta, "edges": {"pipeline": edges, "structure": links}}
     Path(sys.argv[3]).write_text("const DESC = " + json.dumps(out, indent=1, ensure_ascii=False) + ";", encoding="utf-8")
     print(f"{len(pipe)} pipeline nodes, {len(struct)} groups, {len(edges)} pipeline edges, {len(links)} curated links")

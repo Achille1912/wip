@@ -13,7 +13,6 @@ sys.stderr.reconfigure(encoding="utf-8")
 repo, cid, question = Path(sys.argv[1]).resolve(), sys.argv[2], Path(sys.argv[3]).read_text(encoding="utf-8").strip()
 model, kind = (sys.argv[4] if len(sys.argv) > 4 else "sonnet"), (sys.argv[5] if len(sys.argv) > 5 else "node")
 bp = blueprint(repo)
-flat = bp["layout"] == "flat"
 nodes, edges = bp["pipeline"]["nodes"], bp["pipeline"]["edges"]
 N = {n["id"]: n for n in nodes if n["id"] not in ("START", "END")}  # graph nodes (a pipeline, an agent graph)
 C = {n["id"]: n for n in bp["structure"]["nodes"]}  # components: top-level directories or packages
@@ -37,7 +36,7 @@ def reach(start, forward):
 
 
 others = lambda cid, key, field: [m for m in N if m != cid and key in N[m][field]]
-code = lambda n: (n.get("snippet") or function_sources(repo if flat else repo / "src").get(n.get("function"), ""))[:3000]
+code = lambda n: (n.get("snippet") or function_sources(repo).get(n.get("function"), ""))[:3000]
 if ">" in cid:  # a link between two elements
     a, b = cid.split(">")
     if a in N and b in N:

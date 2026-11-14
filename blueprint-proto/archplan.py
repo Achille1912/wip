@@ -3,9 +3,10 @@ so a plan made BEFORE the code can be checked against the result AFTER it. An at
 ("+", "flow", "a", "b"), ("-", "module", "src/x.py"), ("=", "size", "src/x.py", 800)."""
 import re
 
+from extract import CODE_EXT
+
 title = lambda s: s.replace("_", " ").capitalize()
 NAME = re.compile(r"[\w.\-/]{1,120}")
-CODE_EXT = (".py", ".tf", ".yaml", ".yml", ".sh", ".toml")
 
 
 def atom(item):
@@ -18,7 +19,7 @@ def atom(item):
 
     def py(k):  # a repo-relative code file: no absolute path, no ".."
         f = s(k)
-        if f.startswith("/") or ".." in f.split("/") or not f.endswith(CODE_EXT):
+        if f.startswith("/") or ".." in f.split("/") or not f.endswith(tuple(CODE_EXT)):
             raise ValueError(k)
         return f
 

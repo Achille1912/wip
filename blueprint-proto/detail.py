@@ -68,7 +68,7 @@ if __name__ == "__main__":
     repo = Path(sys.argv[1]).resolve()
     load = lambda p, pre: json.loads(Path(p).read_text(encoding="utf-8").removeprefix(pre).removesuffix(";"))
     bp, desc = load(sys.argv[2], "const BP = "), load(sys.argv[3], "const DESC = ")
-    funcs = function_sources(repo if bp.get("layout") == "flat" else repo / "src")
+    funcs = function_sources(repo)
     ctx = project(repo)
     nodes = [n for n in bp["pipeline"]["nodes"] if n["id"] not in ("START", "END")]
     with ThreadPoolExecutor(6) as ex:

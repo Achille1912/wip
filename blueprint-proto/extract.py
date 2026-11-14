@@ -1,4 +1,4 @@
-﻿"""Estrae un blueprint (struttura + pipeline LangGraph) da un repo Python, solo con ast."""
+"""Estrae un blueprint (struttura + pipeline LangGraph) da un repo Python, solo con ast."""
 import ast
 import json
 import os
@@ -8,7 +8,7 @@ from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 
-SKIP = {"__pycache__", ".git", "extension", "node_modules", ".terraform", ".venv", "venv", "site-packages", "dist", "build"}
+SKIP = {"__pycache__", ".git", "extension", "node_modules", ".terraform", ".venv", "venv", "site-packages", "dist", "build", "vendor"}  # vendor: third-party code, not architecture
 JS_EXT = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 PROG_EXT = {".py"} | JS_EXT  # program code, as opposed to infrastructure and scripts
 CODE_EXT = PROG_EXT | {".tf", ".yaml", ".yml", ".sh", ".toml", ".bat", ".cmd", ".ps1"}  # infra and scripts are architecture too
@@ -40,17 +40,21 @@ def state_keys(fn):
 def pipeline(src):
     funcs = {}
     for f in py_files(src):
-        for n in ast.walk(ast.parse(f.read_text(encoding="utf-8", errors="replace"))):
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, ValueError):
+            continue
+        for n in ast.walk(tree):
             if isinstance(n, ast.FunctionDef):
                 funcs[n.name] = (n, f.relative_to(src.parent).as_posix())
     builder = ast.parse((src / "pipeline" / "builder.py").read_text(encoding="utf-8"))
     nodes, edges = {}, []
-    const = lambda a: a.value if isinstance(a, ast.Constant) else ("END" if isinstance(a, ast.Name) and a.id == "END" else None)
+    const = lambda a: a.value if isinstance(a, ast.Constant) else (a.id if isinstance(a, ast.Name) and a.id in ("START", "END") else None)
     for c in ast.walk(builder):
         if not (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)):
             continue
         m = c.func.attr
-        if m == "add_node":
+        if m == "add_node" and len(c.args) == 2:
             name, wrapped = const(c.args[0]), c.args[1]
             fn = wrapped.args[1] if isinstance(wrapped, ast.Call) and len(wrapped.args) > 1 else wrapped
             fname = fn.id if isinstance(fn, ast.Name) else None
@@ -61,11 +65,12 @@ def pipeline(src):
             edges.append({"source": "START", "target": const(c.args[0])})
         elif m == "add_edge":
             edges.append({"source": const(c.args[0]), "target": const(c.args[1])})
-        elif m == "add_conditional_edges":
+        elif m == "add_conditional_edges" and len(c.args) > 2 and isinstance(c.args[2], ast.Dict):  # ponytail: without a literal path_map the targets are unknown, so no edges
             for k, v in zip(c.args[2].keys, c.args[2].values):
                 edges.append({"source": const(c.args[0]), "target": const(v), "label": const(k), "conditional": True})
     nodes["START"] = {"id": "START", "reads": [], "writes": []}
     nodes["END"] = {"id": "END", "reads": [], "writes": []}
+    edges = [e for e in edges if e["source"] in nodes and e["target"] in nodes]  # a name built at runtime cannot be drawn
     for e in edges:  # contratto dedotto: chiavi scritte dal sorgente e lette dal destinatario
         shared = set(nodes[e["source"]]["writes"]) & set(nodes[e["target"]]["reads"])
         e["state_keys"] = sorted(shared)
@@ -73,7 +78,7 @@ def pipeline(src):
 
 
 def code_files(root):
-    """Code files of a flat layout (any CODE_EXT), skipping hidden and vendored directories."""
+    """Code files of the repo (any CODE_EXT), skipping hidden and vendored directories."""
     out = []
     for dp, dn, fn in os.walk(root):
         dn[:] = sorted(d for d in dn if d not in SKIP and not d.startswith("."))
@@ -238,13 +243,13 @@ def blueprint(repo):
     pn, pe = pipeline(repo / "src") if (repo / "src" / "pipeline" / "builder.py").exists() else graph_nodes(repo)
     if len(pn) <= 2:  # only START and END: no graph in this repo
         pn, pe = [], []
-    return {"repo": repo.name, "layout": "flat", "structure": {"nodes": sn, "edges": se}, "pipeline": {"nodes": pn, "edges": pe}}
+    return {"repo": repo.name, "structure": {"nodes": sn, "edges": se}, "pipeline": {"nodes": pn, "edges": pe}}
 
 
 if __name__ == "__main__":
     repo = Path(sys.argv[1]).resolve()
     out = blueprint(repo)
-    # .js e non .json: una pagina aperta da file:// non puÃ² fare fetch di un json locale
+    # .js e non .json: una pagina aperta da file:// non può fare fetch di un json locale
     Path(sys.argv[2]).write_text("const BP = " + json.dumps(out, indent=1) + ";", encoding="utf-8")
     s, p = out["structure"], out["pipeline"]
-    print(f"{out['layout']} layout | structure: {len(s['nodes'])} nodi, {len(s['edges'])} archi | pipeline: {len(p['nodes'])} nodi, {len(p['edges'])} archi")
+    print(f"structure: {len(s['nodes'])} nodi, {len(s['edges'])} archi | pipeline: {len(p['nodes'])} nodi, {len(p['edges'])} archi")

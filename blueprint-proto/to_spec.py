@@ -50,21 +50,6 @@ def lanes(blocchi, meta):
 
 def structure_spec(bp, desc):
     nodes = desc["nodes"]["structure"]
-    if bp.get("layout") != "flat":
-        meta = desc.get("meta", {})
-
-        def block(n):
-            m = meta.get(n["id"], {})
-            sub = " · ".join(x for x in (m.get("layer"), "complex" if n["lines"] > 1500 else "moderate" if n["lines"] > 300 else "simple", ", ".join(m.get("tags", []))) if x)
-            files = [{"id": f"f{i}", "testo": f["path"].rsplit("/", 1)[-1], "tipo": "step", "descrizione": f["role"], "ancore": [f["path"]]} for i, f in enumerate(m.get("files", []))]
-            return {"id": n["id"], "testo": title(n["id"]) + (f"|{sub}" if sub else ""), "tipo": "step", "descrizione": nodes[n["id"]],
-                    **({"ancore": [f["path"] for f in m["files"]]} if m.get("files") else {}),
-                    **({"interno": {"titolo": title(n["id"]) + ": key files", "nodi": files, "archi": []}} if files else {})}
-        blocchi = [block(n) for n in bp["structure"]["nodes"] if n["id"] in nodes]
-        ids = {b["id"] for b in blocchi}
-        archi = [[e["source"], e["target"], "", "", f'{e["source"]} imports {e["target"]} ({e["weight"]} imports)', "imports"]  # deterministic: the extractor counted the imports
-                 for e in bp["structure"]["edges"] if e["source"] in ids and e["target"] in ids]
-        return {"titolo": f'{bp["repo"]}: structure', "blocchi": blocchi, "archi": archi, "gruppi": lanes(blocchi, meta)}
     infra = lambda n: 1 - n["py_lines"] / max(1, n["lines"])
     meta = desc.get("meta", {})
     infra_file = lambda f: f.endswith((".tf", ".yaml", ".yml", ".toml"))
