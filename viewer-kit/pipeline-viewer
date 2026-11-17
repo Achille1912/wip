@@ -174,7 +174,7 @@ def prompt_note(note, E, r, nota_file=None):
 
 
 VENDOR = {"cytoscape.min.js", "elk.bundled.js", "cytoscape-node-html-label.min.js"}  # librerie del disegno, servite da vendor/ (niente CDN)
-SKIP = {"node_modules", "__pycache__", "venv", "site-packages", "dist", "build"}
+SKIP = {"node_modules", "__pycache__", "venv", "site-packages", "dist", "build", "vendor"}  # same as extract.SKIP (hidden dirs are skipped too)
 
 
 EXTS = (".py",)  # file extensions that count as code (see --code-ext)
@@ -193,75 +193,91 @@ def file_py(root):
     return out
 
 
+def _chiamate(nodi):
+    """Nomi usati (chiamati o nominati, es. graph.add_node("x", node_x)) dentro questi nodi, in una sola visita."""
+    out = set()
+    for n in nodi:
+        for c in ast.walk(n):
+            if isinstance(c, ast.Name) and isinstance(c.ctx, ast.Load): out.add(c.id)
+            elif isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute): out.add(c.func.attr)
+    return out
+
+
+def _analizza(root, rel):
+    """Tutto cio' che si ricava da un file da solo: simboli, chiamate, import grezzi, nodi e archi LangGraph. None se illeggibile."""
+    h = lambda s: hashlib.sha1(s.encode()).hexdigest()[:12]
+    try: src = open(os.path.join(root, rel), encoding="utf-8-sig", errors="replace" if not rel.endswith(".py") else "strict").read()
+    except (OSError, ValueError): return None
+    mod = f"{rel}:<modulo>"
+    if not rel.endswith(".py"):  # Terraform, YAML, shell…: one symbol for the whole file is enough for anchors and drift
+        return {"sim": {mod: {"file": rel, "riga": 1, "hash": h(src)}}, "chiam": {mod: set()}, "basi": [], "nomi": {}, "coppie": []}
+    try: tree = ast.parse(src)
+    except (SyntaxError, ValueError): return None
+    righe, sim, chiam = src.splitlines(), {}, {}
+    def visita(nodi, pre):
+        for n in nodi:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                sid = f"{rel}:{pre}{n.name}"
+                sim[sid] = {"file": rel, "riga": n.lineno, "hash": h("\n".join(righe[n.lineno - 1:n.end_lineno]))}
+                if isinstance(n, ast.ClassDef): visita(n.body, f"{pre}{n.name}.")
+                else: chiam[sid] = _chiamate(n.body)
+    visita(tree.body, "")
+    # le istruzioni fuori da ogni funzione (es. app = FastAPI()) stanno in un simbolo <modulo>
+    sim[mod] = {"file": rel, "riga": 1, "hash": h(src)}
+    chiam[mod] = _chiamate([n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))])
+    pkg, basi, nomi, coppie = rel.split("/")[:-1], [], {}, []
+    s = lambda x: x.value if isinstance(x, ast.Constant) and isinstance(x.value, str) else None
+    for n in ast.walk(tree):  # one pass for imports and the LangGraph adapter
+        if isinstance(n, ast.Import): basi += [(a.name.split("."), []) for a in n.names]
+        elif isinstance(n, ast.ImportFrom):
+            base = (pkg[:len(pkg) - (n.level - 1)] if n.level else []) + (n.module.split(".") if n.module else [])
+            basi += [(base, [a.name]) for a in n.names]
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            # adattatore LangGraph: add_node/add_edge/add_conditional_edges dichiarano un flusso tra funzioni che non e' una chiamata
+            a = n.args
+            if n.func.attr == "add_node" and len(a) == 2 and s(a[0]):  # add_node("x", f) o add_node("x", wrapper("x", f))
+                fn = [m.id for m in ast.walk(a[1]) if isinstance(m, ast.Name)]
+                if fn: nomi[s(a[0])] = fn[-1]
+            elif n.func.attr == "add_edge" and len(a) == 2: coppie.append((s(a[0]), s(a[1])))
+            elif n.func.attr == "add_conditional_edges" and len(a) >= 3 and isinstance(a[2], ast.Dict): coppie += [(s(a[0]), s(v)) for v in a[2].values]
+    return {"sim": sim, "chiam": chiam, "basi": basi, "nomi": nomi, "coppie": coppie}
+
+
+_PER_FILE = {}  # {root: {rel: (mtime, analisi)}}: a file is parsed again only when its mtime changes
+
+
 def estrai(root, files=None):
     """Base di verita' deterministica, solo da ast: simboli (funzioni, classi, metodi) con riga e hash, chiamate, import.
     ponytail: le chiamate si risolvono per nome (sovrastima se due funzioni si chiamano uguale), gli import solo
     da radice del progetto; passare a una risoluzione per scope e per pacchetto se serve piu' precisione."""
     files = files if files is not None else file_py(root)
-    sim, chiam, imp, flusso = {}, {}, {}, set()
-    # "usa" = chiama oppure nomina (es. passa la funzione come argomento: graph.add_node("x", node_x))
-    chiamate = lambda nodi: ({c.func.id if isinstance(c.func, ast.Name) else c.func.attr for n in nodi for c in ast.walk(n)
-                              if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute))}
-                             | {c.id for n in nodi for c in ast.walk(n) if isinstance(c, ast.Name) and isinstance(c.ctx, ast.Load)})
+    vecchi, nuovi = _PER_FILE.get(root, {}), {}
+    for rel, mt in files.items():
+        nuovi[rel] = vecchi[rel] if rel in vecchi and vecchi[rel][0] == mt else (mt, _analizza(root, rel))
+    _PER_FILE[root] = nuovi  # deleted files drop out
     def a_file(parti):
         for c in ("/".join(parti) + ".py", "/".join(parti + ["__init__"]) + ".py"):
             if c in files: return c
-    for rel in files:
-        if not rel.endswith(".py"):  # Terraform, YAML, shell…: one symbol for the whole file is enough for anchors and drift
-            try: src = open(os.path.join(root, rel), encoding="utf-8-sig", errors="replace").read()
-            except OSError: continue
-            sim[f"{rel}:<modulo>"] = {"file": rel, "riga": 1, "hash": hashlib.sha1(src.encode()).hexdigest()[:12]}; chiam[f"{rel}:<modulo>"] = set(); imp[rel] = set(); continue
-        try: src = open(os.path.join(root, rel), encoding="utf-8-sig").read(); tree = ast.parse(src)
-        except (OSError, SyntaxError, ValueError): continue
-        righe = src.splitlines()
-        def visita(nodi, pre):
-            for n in nodi:
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    sid = f"{rel}:{pre}{n.name}"
-                    sim[sid] = {"file": rel, "riga": n.lineno, "hash": hashlib.sha1("\n".join(righe[n.lineno - 1:n.end_lineno]).encode()).hexdigest()[:12]}
-                    if isinstance(n, ast.ClassDef): visita(n.body, f"{pre}{n.name}.")
-                    else: chiam[sid] = chiamate(n.body)
-        visita(tree.body, "")
-        # le istruzioni fuori da ogni funzione (es. app = FastAPI()) stanno in un simbolo <modulo>
-        sim[f"{rel}:<modulo>"] = {"file": rel, "riga": 1, "hash": hashlib.sha1(src.encode()).hexdigest()[:12]}
-        chiam[f"{rel}:<modulo>"] = chiamate([n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))])
-        dest, pkg = set(), rel.split("/")[:-1]
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Import): basi = [(a.name.split("."), []) for a in n.names]
-            elif isinstance(n, ast.ImportFrom):
-                base = (pkg[:len(pkg) - (n.level - 1)] if n.level else []) + (n.module.split(".") if n.module else [])
-                basi = [(base, [a.name]) for a in n.names] if n.names else []
-            else: continue
-            for base, nomi in basi:
-                for p in [base] + [base + [x] for x in nomi]:
-                    f = a_file(p) if p else None
-                    if f and f != rel: dest.add(f)
-        imp[rel] = dest
-        # adattatore LangGraph: add_node/add_edge/add_conditional_edges dichiarano un flusso tra funzioni che non e' una chiamata
-        s = lambda x: x.value if isinstance(x, ast.Constant) and isinstance(x.value, str) else None
-        nomi, coppie = {}, []
-        for c in ast.walk(tree):
-            if not (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)): continue
-            a = c.args
-            if c.func.attr == "add_node" and len(a) == 2 and s(a[0]):  # add_node("x", f) o add_node("x", wrapper("x", f))
-                fn = [m.id for m in ast.walk(a[1]) if isinstance(m, ast.Name)]
-                if fn: nomi[s(a[0])] = fn[-1]
-            elif c.func.attr == "add_edge" and len(a) == 2: coppie.append((s(a[0]), s(a[1])))
-            elif c.func.attr == "add_conditional_edges" and len(a) >= 3 and isinstance(a[2], ast.Dict): coppie += [(s(a[0]), s(v)) for v in a[2].values]
-        flusso |= {(nomi[x], nomi[y]) for x, y in coppie if x in nomi and y in nomi}
-    return {"sim": sim, "chiam": chiam, "imp": imp, "files": files, "flusso": flusso}
+    sim, chiam, imp, flusso, per_file = {}, {}, {}, set(), {}
+    for rel, (_, x) in nuovi.items():
+        if x is None: continue
+        sim.update(x["sim"]); chiam.update(x["chiam"]); per_file[rel] = list(x["sim"])
+        imp[rel] = {f for base, nomi in x["basi"] for q in [base] + [base + [y] for y in nomi] if q for f in [a_file(q)] if f and f != rel}
+        flusso |= {(x["nomi"][a], x["nomi"][b]) for a, b in x["coppie"] if a in x["nomi"] and b in x["nomi"]}
+    return {"sim": sim, "chiam": chiam, "imp": imp, "files": files, "flusso": flusso, "per_file": per_file}
 
 
 def risolvi(a, E):
     """Ancora 'file' o 'file:Classe.metodo' -> simboli reali. Per una classe, anche i suoi metodi."""
     f, _, q = a.partition(":")
-    if not q: return [s for s, v in E["sim"].items() if v["file"] == f]
-    return [s for s in E["sim"] if s == a or s.startswith(a + ".")]
+    ss = E["per_file"].get(f, [])  # index by file: a scan of every symbol per anchor took seconds on a big repo
+    return list(ss) if not q else [s for s in ss if s == a or s.startswith(a + ".")]
 
 
 def prova(E, sa, sb):
     """Perche' c'e' una freccia da A a B? Ritorna (testo, etichetta breve) o None. Prove ammesse: A usa (chiama o nomina)
     un simbolo di B, A importa un file di B, oppure il grafo (LangGraph add_edge) collega le loro funzioni."""
+    if not sa or not sb: return None  # an inner step has no symbols of its own: nothing can prove a link (and this skips most calls)
     nome = lambda s: s.rpartition(":")[2].rpartition(".")[2]
     nomi, fb = {nome(s) for s in sb}, {E["sim"][s]["file"] for s in sb}
     usati = sorted(set().union(*(E["chiam"].get(s, set()) for s in sa)) & nomi) if sa else []
@@ -410,7 +426,7 @@ button,input,select{border-radius:6px}
 #top{position:fixed;top:0;left:0;right:0;height:var(--top);display:flex;align-items:center;gap:.75rem;padding:0 .75rem;background:var(--pa);border-bottom:1px solid var(--b);z-index:15}
 #ti{display:flex;align-items:center;gap:.6rem;min-width:0}#ti .lo{flex:none;width:26px;height:26px;border-radius:6px;background:var(--pb);color:var(--pf);display:grid;place-items:center;font-weight:800;font-size:13px}
 #ti h1{font-size:.95rem;margin:0;white-space:nowrap}#ti .m{font-size:.78rem;line-height:1.2}#ti .m button{padding:0 .3rem;font-size:.78rem}
-#ab{margin-left:auto;display:flex;gap:.3rem;align-items:center;min-width:0}#ab button{border-color:transparent;color:var(--mu)}#ab button:hover{color:var(--fg);border-color:var(--b)}
+.static #ab,.static #nr,.static #cmd,.static #tb{display:none!important}#qq{display:flex;align-items:center;gap:.4rem;min-width:0}#q{width:min(16rem,28vw);padding:.3rem .55rem;border:1px solid var(--b);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}#qn{white-space:nowrap}#ab{margin-left:auto;display:flex;gap:.3rem;align-items:center;min-width:0}#ab button{border-color:transparent;color:var(--mu)}#ab button:hover{color:var(--fg);border-color:var(--b)}
 #ab .nota{max-width:22rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #th{width:34px;padding:.25rem 0;border-color:var(--b)}
 #pl{top:var(--top);left:var(--rail);right:var(--side);background-color:var(--bg)}
@@ -437,7 +453,8 @@ button,input,select{border-radius:6px}
 <div id="pl"></div><div id="cv" hidden></div>
 <div id="nf" role="alert"></div>
 <header id="top"><div id="ti"><span class="lo">B</span><div><h1 id="tt">Pipeline</h1><div id="bc" class="m"></div></div></div>
-<div id="ab"><button id="cp" title="Copy a prompt for Claude with the open notes">Copy prompt</button><button id="cm" title="Copy a prompt that rebuilds the model">Rebuild model</button><button id="rl">Auto-arrange</button><button id="rf" hidden>Refresh</button><span id="rs" class="nota"></span><span id="cs" class="nota"></span><button id="th" title="Switch light / dark theme" aria-label="Switch theme">◐</button></div></header>
+<div id="qq"><input id="q" type="search" placeholder="Search (/)" aria-label="Search components, files and code" autocomplete="off"><span id="qn" class="m"></span></div>
+<div id="ab"><button id="cp" title="Copy a prompt for Claude with the open notes">Copy prompt</button><button id="cm" title="Copy a prompt that rebuilds the model">Rebuild model</button><button id="rl">Auto-arrange</button><button id="ex" title="Download this diagram as one read-only HTML file">Export</button><button id="rf" hidden>Refresh</button><span id="rs" class="nota"></span><span id="cs" class="nota"></span><button id="th" title="Switch light / dark theme" aria-label="Switch theme">◐</button></div></header>
 <div id="cmd"><kbd>Ctrl K</kbd><input id="ci" placeholder="Describe a change to the selected block…" aria-label="Note on the selected block"><button id="pn" hidden title="Turn the open notes into an architecture plan (Shift+P)">Plan changes</button><button id="ru" class="p" hidden title="Run the open notes directly (Shift+R)">Run notes</button></div>
 <div id="tb" class="isl"><button data-t="select" class="on" title="Select (V)" aria-label="Select">↖</button><button data-t="hand" title="Hand: pan (H, or hold Space)" aria-label="Hand">✋</button><button data-t="rect" title="Rectangle (R)" aria-label="Rectangle">▭</button><button data-t="ellipse" title="Ellipse (O)" aria-label="Ellipse">◯</button><button data-t="diamond" title="Diamond (D)" aria-label="Diamond">◇</button><button data-t="triangle" title="Triangle" aria-label="Triangle">△</button><button data-t="star" title="Star" aria-label="Star">☆</button><button data-t="hexagon" title="Hexagon" aria-label="Hexagon">⬡</button><button data-t="text" title="Text block / comment (T)" aria-label="Text block">T</button><button id="em" title="Emoji (E)" aria-label="Emoji">😀</button><div id="ep" hidden></div></div><div id="ft" class="isl" hidden></div><div id="zm" class="isl"><button id="z1" aria-label="Zoom in">+</button><button id="z2" aria-label="Zoom out">−</button><button id="z3">Fit</button></div>
 <details id="lgd" class="isl"><summary>Legend</summary><div class="lgc nota"><span class="lg" style="--k:var(--s-prop)">entry point</span><span class="lg" style="--k:var(--s-step)">step</span><span class="lg" style="--k:var(--s-ai)">LLM step</span><span class="lg" style="--k:var(--s-ok)">document</span><span class="lg" style="--k:var(--s-dec)">decision</span><span class="lg" style="--k:var(--s-store)">external or store</span>
@@ -461,7 +478,7 @@ const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",
 const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 let PL=null,sel=null,vista="",primo=true,cy=null,tok=0,apriId="";const CAMS={};  // CAMS: zoom e posizione di ogni vista, per non perderli quando si ridisegna
 const mem=(k,v)=>{try{sessionStorage.setItem(k,v)}catch(e){}};
-const sp=x=>JSON.stringify(x,(k,v)=>k=="pos"?undefined:v);  // le posizioni a mano non cambiano la struttura: niente ridisegno
+const sp=x=>JSON.stringify(x,(k,v)=>k=="pos"?undefined:v),LAYOUT={};  // le posizioni a mano non cambiano la struttura: niente ridisegno
 async function post(o,u="/api/nota"){return(await fetch(u,{method:"POST",body:JSON.stringify({token:T,...o})})).json()}
 function bc(){const b=$("bc");b.replaceChildren();mem("vista",vista);
  if(!vista){b.textContent="Full diagram";return}
@@ -568,7 +585,8 @@ function stile(giu,corsie){const fg=css("--fg"),bg=css("--bg"),ac=css("--ac"),pr
   {selector:"edge:selected",style:{width:3.4}}]}
 async function mostra(){bset("layout",1);try{await mostra0()}finally{bset("layout",0);$("boot").hidden=true}}  // the canvas is being laid out: top bar + first-load spinner
 async function mostra0(){
- const V=vista?PL.dettagli[vista].vista:PL.vista,mio=++tok,P=await posiziona(V);
+ const V=vista?PL.dettagli[vista].vista:PL.vista,mio=++tok,lk=sp(V),P=LAYOUT[vista]&&LAYOUT[vista].k===lk?LAYOUT[vista].P:await posiziona(V);
+ LAYOUT[vista]={k:lk,P};  // going back to a view does not run ELK again
  if(mio!==tok)return;  // un'altra vista ha preso il posto mentre ELK calcolava
  if(cy){cy.destroy();cy=null}$("pl").replaceChildren();
  MANY=V.archi.length>12;const els=[...V.gruppi.map(g=>({data:{id:g.id,label:g.titolo},classes:"gr gr-"+g.colore,grabbable:false})),
@@ -711,12 +729,25 @@ async function carica(){
  if(!cambiato){marca();note();return}
  if(vista&&!PL.dettagli[vista])vista="";
  await mostra();note()}
+let QH=[],QI=0,QS="";  // search: the hits of the last query, and which one is shown
+async function cerca(s){s=s.trim().toLowerCase();if(!s||!PL)return;
+ if(s!==QS){QS=s;QI=0;QH=Object.entries(PL.meta).filter(([k,m])=>m.tipo=="nodo"&&[m.titolo,m.descrizione,m.codice,m.dettaglio].join(" ").toLowerCase().includes(s)).map(([k])=>k)}
+ if(!QH.length){$("qn").textContent="no match";return}
+ const i=QI++%QH.length,id=QH[i],v=id.includes("/")?id.split("/")[0]:"";$("qn").textContent=`${i+1}/${QH.length}`;
+ if(v!==vista&&(!v||PL.dettagli[v])){vista=v;await mostra()}  // a step inside a block: open that block
+ const x=cy&&cy.getElementById(id);if(!x||!x.length)return;
+ cy.animate({center:{eles:x},zoom:Math.max(cy.zoom(),.9)},{duration:250});cy.elements().unselect();x.select();scegli(x,$("pl").clientHeight/2)}
+$("q").onkeydown=e=>{if(e.key=="Enter"){e.preventDefault();cerca($("q").value)}else if(e.key=="Escape")$("q").blur()};
+$("q").oninput=()=>{QS="";$("qn").textContent=""};
+$("ex").onclick=()=>{location.href="/api/export"};
+if(typeof STATIC!="undefined")document.body.classList.add("static");  // an exported file is read-only: no actions, notes or drawing
 $("open").onclick=()=>apri(apriId);
 $("pl").oncontextmenu=e=>e.preventDefault();
 $("pl").ondblclick=e=>{if(!cy)return;const r=$("pl").getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
  const n=cy.nodes(".card").filter(n=>{const b=n.renderedBoundingBox({includeLabels:false,includeOverlays:false});return x>=b.x1&&x<=b.x2&&y>=b.y1&&y<=b.y2}).first();
  if(n.length)apri(n.data("apri")||n.id())};
-document.addEventListener("keydown",e=>{if(["INPUT","SELECT","TEXTAREA"].includes(e.target.tagName)||shortcuts(e))return;
+document.addEventListener("keydown",e=>{if(e.key=="/"&&!["INPUT","SELECT","TEXTAREA"].includes(e.target.tagName)){e.preventDefault();$("q").focus();return}
+ if(["INPUT","SELECT","TEXTAREA"].includes(e.target.tagName)||shortcuts(e))return;
  if(e.key=="Enter"&&sel&&!$("sel").hidden)apri(apriId);
  if(e.key=="Escape"){if(!$("sel").hidden)chiudi();else if(vista){vista="";mostra()}}});
 async function salva(){const t=$("nn").value.trim();if(!sel||!t)return;
@@ -805,7 +836,7 @@ def main():
     if not os.path.exists(spec_path): sys.exit(f"{spec_path} non trovato. Crea un esempio con --init")
     nota_dir = os.path.join(os.path.dirname(spec_path), ".pipeline-viewer"); nota_file = os.path.join(nota_dir, "note.json")
     TOKEN, BOOT, LOCK = secrets.token_urlsafe(24), secrets.token_hex(4), threading.Lock()
-    cache = {"m": None, "dati": None}
+    cache, DLOCK = {"m": None, "dati": None}, threading.Lock()  # DLOCK: concurrent requests wait for one rebuild instead of each doing it
     root, sigilli_file = os.path.abspath(A.root), os.path.join(nota_dir, "sigilli.json")
     pos_file = os.path.join(nota_dir, "posizioni.json")  # {vista: {id nodo: [x, y]}} dei nodi trascinati a mano; la spec non si tocca
 
@@ -979,17 +1010,18 @@ def main():
 
     def dati():
         # si ricalcola se cambia la spec o un qualunque .py: la pagina segue il codice
-        m = (os.stat(spec_path).st_mtime, hash(frozenset(file_py(root).items())), os.path.getmtime(pos_file) if os.path.exists(pos_file) else 0)
-        if cache["m"] != m:
-            try:
-                spec = json.load(open(spec_path, encoding="utf-8"))
-                err = valida(spec)
-                v = None if err else verifica(spec)
-                cache["dati"] = {"errore": err} if err else costruisci(spec, v and v[1], leggi_pos())
-            except (OSError, ValueError) as e:
-                cache["dati"] = {"errore": f"Invalid JSON: {e}"}
-            cache["m"] = m
-        return cache["dati"]
+        with DLOCK:
+            m = (os.stat(spec_path).st_mtime, hash(frozenset(file_py(root).items())), os.path.getmtime(pos_file) if os.path.exists(pos_file) else 0)
+            if cache["m"] != m:
+                try:
+                    spec = json.load(open(spec_path, encoding="utf-8"))
+                    err = valida(spec)
+                    v = None if err else verifica(spec)
+                    cache["dati"] = {"errore": err} if err else costruisci(spec, v and v[1], leggi_pos())
+                except (OSError, ValueError) as e:
+                    cache["dati"] = {"errore": f"Invalid JSON: {e}"}
+                cache["m"] = m
+            return cache["dati"]
 
     if A.check or A.sigilla:
         spec = json.load(open(spec_path, encoding="utf-8")); err = valida(spec)
@@ -1008,15 +1040,27 @@ def main():
         print(f"copertura {cp['coperti']}/{cp['tot']} simboli; non coperti: {', '.join(cp['scoperti'][:10])}{'...' if len(cp['scoperti']) > 10 else ''}")
         sys.exit(1 if brutti or senza else 0)
 
+    def esporta():
+        """The page as one file: libraries inline, data frozen, fetch answered from the data. Opens from disk, no server."""
+        off = {"enabled": False, "running": False, "ok": None, "tail": "", "result": None}
+        d = {**dati(), "note": leggi_note(), "annot": leggi_annot(), "stili": leggi_stili(), "perm": [], "caps": {}, "refresh": {**off, "last": 0, "stale": False}, "plan": off, "run": off}
+        shim = ("<script>const STATIC=" + json.dumps(d, ensure_ascii=False).replace("</", "<\\/") + ';window.fetch=async u=>{u=String(u);'
+                'const b=u.startsWith("/api/pipeline")?STATIC:u=="/api/versione"?{boot:"static"}:u=="/api/runs"?{runs:[]}:{errore:"Read-only export"};'
+                'return new Response(JSON.stringify(b),{headers:{"Content-Type":"application/json"}})}</script>')
+        lib = lambda m: "<script>" + open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", m.group(1)), encoding="utf-8").read() + "</script>"
+        page = PAGE.replace("__TOKEN__", "").replace('<script src="/vendor/', shim + '<script src="/vendor/', 1)
+        return re.sub(r'<script src="/vendor/([\w.-]+)"></script>', lib, page)
+
     def leggi_note():
         try: return json.load(open(nota_file, encoding="utf-8"))
         except (OSError, ValueError): return []
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a): pass
-        def send(self, code, body, ctype="application/json"):
+        def send(self, code, body, ctype="application/json", extra=()):
             b = body.encode()
             self.send_response(code); self.send_header("Content-Type", ctype + "; charset=utf-8")
+            for k, v in extra: self.send_header(k, v)
             self.send_header("Content-Length", str(len(b))); self.send_header("Cache-Control", "no-store"); self.end_headers()
             try: self.wfile.write(b)
             except (BrokenPipeError, ConnectionResetError): pass
@@ -1029,6 +1073,7 @@ def main():
                 try: return self.send(200, open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", self.path[8:]), encoding="utf-8").read(), "application/javascript")
                 except OSError: return self.j(404, {"errore": "missing library: also copy the vendor folder"})
             if self.path == "/api/versione": return self.j(200, {"boot": BOOT})
+            if self.path == "/api/export": return self.send(200, esporta(), "text/html", [("Content-Disposition", f'attachment; filename="{re.sub(r"[^\w.-]+", "-", dati().get("titolo") or "blueprint").strip("-")}.html"')])
             if self.path == "/api/runs": return self.j(200, {"runs": leggi_runs()})
             if self.path == "/api/pipeline": return self.j(200, {**dati(), "note": leggi_note(), "refresh": stato_refresh(), "perm": leggi_perm(), "plan": {"enabled": bool(A.plan_cmd), "running": PN["running"], "ok": PN["ok"], "tail": PN["tail"], "result": leggi_plan()}, "annot": leggi_annot(), "stili": leggi_stili(), "caps": {"rules": bool(A.rules_cmd), "ask": bool(A.ask_cmd)},
                                                   "run": {"enabled": bool(A.run_cmd), "running": RN["running"], "ok": RN["ok"], "tail": RN["tail"], "result": leggi_run()}})

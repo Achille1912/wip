@@ -96,6 +96,10 @@ def digest(repo, rel):
         names = re.findall(r"\bexport\s+(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|class|interface|type|enum)\s+(\w+)", text)
         if names:
             return f"{rel}: exports {', '.join(dict.fromkeys(names))}"[:260]
+    if f.suffix == ".dart":  # same reason: classes, enums, mixins and extensions say what the file is
+        names = re.findall(r"(?m)^\s*(?:(?:abstract|sealed|final|base|interface)\s+)*(?:class|enum|mixin|extension)\s+(\w+)", text)
+        if names:
+            return f"{rel}: declares {', '.join(dict.fromkeys(names))}"[:260]
     lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not set(ln.strip()) <= set("-=#/ *")]
     return f"{rel}: " + " / ".join(lines[:8])[:260]
 

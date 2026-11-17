@@ -1,4 +1,4 @@
-"""JS/TS imports become component links: relative paths, folder index imports, the @src alias; packages are ignored."""
+"""JS/TS and Dart imports become component links: relative paths, folder index imports, the @src alias, package:<app>/; packages are ignored."""
 import tempfile
 from pathlib import Path
 
@@ -28,6 +28,28 @@ def test_js_imports():
         assert links == {("main", "components"), ("main", "api"), ("components", "api"), ("(root)", "mock-api")}, links
 
 
+
+def test_dart_flutter():
+    with tempfile.TemporaryDirectory() as d:
+        r = Path(d).resolve()
+        files = {
+            "pubspec.yaml": "name: shop\ndependencies:\n  flutter:\n    sdk: flutter\n",
+            "lib/main.dart": "import 'package:flutter/material.dart';\nimport 'views/home.dart';\n",
+            "lib/views/home.dart": "import '../models/item.dart';\nimport 'dart:io';\nclass Home {}\n",
+            "lib/models/item.dart": "class Item {}\n",
+            "test/item_test.dart": "import 'package:shop/models/item.dart';\n",
+            "android/settings.gradle.kts": 'plugins { id("dev.flutter.flutter-plugin-loader") }\n',
+        }
+        for p, t in files.items():
+            (r / p).parent.mkdir(parents=True, exist_ok=True)
+            (r / p).write_text(t, encoding="utf-8")
+        nodes, edges = flat_structure(r)
+        assert sorted(n["id"] for n in nodes) == ["(root)", "android", "main", "models", "test", "views"], nodes
+        links = {(e["source"], e["target"], e["kind"]) for e in edges}
+        assert {("main", "views", "import"), ("views", "models", "import"), ("test", "models", "import"), ("android", "main", "mention")} <= links, links
+
+
 if __name__ == "__main__":
     test_js_imports()
+    test_dart_flutter()
     print("ok")

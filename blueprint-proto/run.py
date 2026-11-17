@@ -11,8 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent import run_agent
-from archplan import check_plan, fmt, title
-from extract import blueprint, code_files, py_files
+from archplan import arch_atoms, check_plan, extract, fmt, title
 
 repo, bp_file, state, cmd = Path(sys.argv[1]).resolve(), sys.argv[2], Path(sys.argv[3]).resolve(), sys.argv[4]
 run_dir, wt, out = state / "run", state / "run" / "wt", state / "run.json"
@@ -23,40 +22,6 @@ def git(*a, cwd=repo, check=True):
     if check and r.returncode:
         raise RuntimeError(f"git {a[0]}: {(r.stderr or r.stdout).strip()[:300]}")
     return r.stdout
-
-
-def files_of(root):
-    """{file: line count} of the project's code files (package markers excluded): module-level changes of a split or a merge."""
-    fs = code_files(root)  # the same files the blueprint's components are made of
-    return {p.relative_to(root).as_posix(): len(p.read_text(encoding="utf-8-sig", errors="replace").splitlines()) for p in fs if p.name != "__init__.py"}
-
-
-def extract(root):
-    bp = blueprint(root)  # the same extraction that builds the blueprint, whatever the layout
-    return (bp["structure"]["nodes"], bp["structure"]["edges"]), (bp["pipeline"]["nodes"], bp["pipeline"]["edges"]), files_of(root)
-
-
-def arch_atoms(a, b):
-    """Architecture changes between two extractions, as atoms (see archplan): packages and their dependencies, components, flows,
-    data keys each component reads/writes, and the Python modules that appeared or disappeared."""
-    (sn0, se0), (pn0, pe0), f0 = a
-    (sn1, se1), (pn1, pe1), f1 = b
-    out = []
-
-    def sets(kind, x, y):
-        out.extend(("+", kind, *i) for i in sorted(y - x))
-        out.extend(("-", kind, *i) for i in sorted(x - y))
-
-    sets("package", {(n["id"],) for n in sn0}, {(n["id"],) for n in sn1})
-    sets("dep", {(e["source"], e["target"]) for e in se0}, {(e["source"], e["target"]) for e in se1})
-    sets("component", {(n["id"],) for n in pn0}, {(n["id"],) for n in pn1})
-    sets("flow", {(e["source"], e["target"]) for e in pe0}, {(e["source"], e["target"]) for e in pe1})
-    sets("module", {(f,) for f in f0}, {(f,) for f in f1})
-    old = {n["id"]: n for n in pn0}
-    for n in pn1:
-        for k in ("writes", "reads") if n["id"] in old else ():
-            sets(k, {(n["id"], x) for x in old[n["id"]][k]}, {(n["id"], x) for x in n[k]})
-    return out
 
 
 def groups_of(files):

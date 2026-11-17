@@ -1,4 +1,7 @@
 """The trust boundaries: what the coding agent may do on its own, which plan items an LLM can make us accept, and a modern LangGraph builder."""
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -53,8 +56,28 @@ def test_langgraph_start_and_router_without_map():
         assert next(e for e in p["edges"] if e["source"] == "a")["state_keys"] == ["x"]
 
 
+def test_rules_cycles_and_layers():
+    with tempfile.TemporaryDirectory() as d:
+        r, data = Path(d) / "app", Path(d) / "data"
+        for p, s in {"a/x.py": "import b.y\n", "b/y.py": "import c.z\n", "c/z.py": "import a.x\n", "d/w.py": "import a.x\n"}.items():
+            (r / p).parent.mkdir(parents=True, exist_ok=True)
+            (r / p).write_text(s, encoding="utf-8")
+        (data / "work" / "app").mkdir(parents=True)
+        meta = {"a": {"layer": "Data"}, "b": {"layer": "Service"}, "c": {"layer": "Service"}, "d": {"layer": "Interface"}}
+        (data / "work" / "app" / "descriptions.js").write_text("const DESC = " + json.dumps({"meta": meta}) + ";", encoding="utf-8")
+        rules = Path(d) / "rules.json"
+        rules.write_text(json.dumps([{"id": "1", "text": "", "check": {"type": "no_cycles"}},
+                                     {"id": "2", "text": "", "check": {"type": "layer_order", "from": "Interface", "to": "Data"}}]), encoding="utf-8")
+        out = subprocess.run([sys.executable, "rules.py", str(r), str(rules), "check"], capture_output=True, text=True, check=True,
+                             cwd=Path(__file__).parent, env={**os.environ, "BLUEPRINT_DATA": str(data)}).stdout
+        cyc, lay = (x["violations"] for x in json.loads(out)["rules"])
+        assert [v["nodes"] for v in cyc] == [["a", "b", "c"]], cyc  # d imports into the cycle but is not part of it
+        assert [v["nodes"] for v in lay] == [["d", "a"]], lay
+
+
 if __name__ == "__main__":
     test_decide()
     test_atom()
     test_langgraph_start_and_router_without_map()
+    test_rules_cycles_and_layers()
     print("ok")

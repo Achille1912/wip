@@ -3,7 +3,7 @@ so a plan made BEFORE the code can be checked against the result AFTER it. An at
 ("+", "flow", "a", "b"), ("-", "module", "src/x.py"), ("=", "size", "src/x.py", 800)."""
 import re
 
-from extract import CODE_EXT
+from extract import CODE_EXT, blueprint, code_files
 
 title = lambda s: s.replace("_", " ").capitalize()
 NAME = re.compile(r"[\w.\-/]{1,120}")
@@ -65,3 +65,37 @@ def check_plan(items, atoms, sizes):
     ok = lambda a: sizes.get(a[2], 0) <= a[3] if a[1] == "size" else a in actual  # a size limit on a file that is gone is met
     return {"done": [fmt(a) for a in planned if ok(a)], "missing": [fmt(a) for a in planned if not ok(a)],
             "unplanned": [fmt(a) for a in atoms if a not in set(planned)]}
+
+
+def files_of(root):
+    """{file: line count} of the project's code files (package markers excluded): module-level changes of a split or a merge."""
+    fs = code_files(root)  # the same files the blueprint's components are made of
+    return {p.relative_to(root).as_posix(): len(p.read_text(encoding="utf-8-sig", errors="replace").splitlines()) for p in fs if p.name != "__init__.py"}
+
+
+def extract(root):
+    bp = blueprint(root)  # the same extraction that builds the blueprint, whatever the layout
+    return (bp["structure"]["nodes"], bp["structure"]["edges"]), (bp["pipeline"]["nodes"], bp["pipeline"]["edges"]), files_of(root)
+
+
+def arch_atoms(a, b):
+    """Architecture changes between two extractions, as atoms (see archplan): packages and their dependencies, components, flows,
+    data keys each component reads/writes, and the Python modules that appeared or disappeared."""
+    (sn0, se0), (pn0, pe0), f0 = a
+    (sn1, se1), (pn1, pe1), f1 = b
+    out = []
+
+    def sets(kind, x, y):
+        out.extend(("+", kind, *i) for i in sorted(y - x))
+        out.extend(("-", kind, *i) for i in sorted(x - y))
+
+    sets("package", {(n["id"],) for n in sn0}, {(n["id"],) for n in sn1})
+    sets("dep", {(e["source"], e["target"]) for e in se0}, {(e["source"], e["target"]) for e in se1})
+    sets("component", {(n["id"],) for n in pn0}, {(n["id"],) for n in pn1})
+    sets("flow", {(e["source"], e["target"]) for e in pe0}, {(e["source"], e["target"]) for e in pe1})
+    sets("module", {(f,) for f in f0}, {(f,) for f in f1})
+    old = {n["id"]: n for n in pn0}
+    for n in pn1:
+        for k in ("writes", "reads") if n["id"] in old else ():
+            sets(k, {(n["id"], x) for x in old[n["id"]][k]}, {(n["id"], x) for x in n[k]})
+    return out

@@ -3,6 +3,7 @@ import ast
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import defaultdict
 from itertools import combinations
@@ -10,11 +11,14 @@ from pathlib import Path
 
 SKIP = {"__pycache__", ".git", "extension", "node_modules", ".terraform", ".venv", "venv", "site-packages", "dist", "build", "vendor"}  # vendor: third-party code, not architecture
 JS_EXT = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
-PROG_EXT = {".py"} | JS_EXT  # program code, as opposed to infrastructure and scripts
-CODE_EXT = PROG_EXT | {".tf", ".yaml", ".yml", ".sh", ".toml", ".bat", ".cmd", ".ps1"}  # infra and scripts are architecture too
+PROG_EXT = {".py", ".dart", ".kt", ".swift"} | JS_EXT  # program code, as opposed to infrastructure and scripts
+BUILD_EXT = {".gradle", ".kts", ".xcconfig", ".cmake"}  # native build files: how a mobile/desktop app is built
+CODE_EXT = PROG_EXT | BUILD_EXT | {".tf", ".yaml", ".yml", ".sh", ".toml", ".bat", ".cmd", ".ps1"}  # infra and scripts are architecture too
 # import x from '…', import '…', import('…'), require('…'), export … from '…'
 JS_IMPORT = re.compile(r"""(?:\bimport\s+(?:type\s+)?[\w*{}\s,$]*?\s*from\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bexport\s+[\w*{}\s,$]*?\s*from\s*)['"]([^'"\n]+)['"]""")
 JS_ALIAS = ("@src/", "@/", "~/")  # ponytail: the usual aliases of src/; read vite/tsconfig paths if a repo uses another one
+DART_IMPORT = re.compile(r"""^\s*(?:import|export|part)\s+['"]([^'"]+)['"]""", re.M)
+PLATFORMS = ("android", "ios", "macos", "linux", "windows", "web")  # Flutter's native runners
 
 
 def py_files(root):
@@ -78,11 +82,14 @@ def pipeline(src):
 
 
 def code_files(root):
-    """Code files of the repo (any CODE_EXT), skipping hidden and vendored directories."""
+    """Code files of the repo (any CODE_EXT), skipping hidden and vendored directories and, in a git repo, what git ignores."""
+    r = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"], capture_output=True)
+    seen = set(r.stdout.decode("utf-8", "replace").split("\0")) if r.returncode == 0 else None  # generated files (work/, build output) are not code
     out = []
     for dp, dn, fn in os.walk(root):
         dn[:] = sorted(d for d in dn if d not in SKIP and not d.startswith("."))
-        out += [Path(dp) / f for f in sorted(fn) if Path(f).suffix in CODE_EXT or f.startswith("Dockerfile")]
+        out += [Path(dp) / f for f in sorted(fn) if (Path(f).suffix in CODE_EXT or f.startswith("Dockerfile"))
+                and (seen is None or (Path(dp) / f).relative_to(root).as_posix() in seen)]
     return out
 
 
@@ -97,16 +104,32 @@ def flat_structure(repo):
     identifiers (env vars, config paths) that only 2-3 components share. The LLM later curates and describes them, it never invents one."""
     files = code_files(repo)
     rel = lambda f: f.relative_to(repo).as_posix()
+    pub = repo / "pubspec.yaml"  # a Dart/Flutter app: its code is under lib/, laid out like src/
+    dart_pkg = (re.search(r"(?m)^name:\s*(\S+)", pub.read_text(encoding="utf-8", errors="replace")) or [None, None])[1] if pub.exists() else None
+    pkg_roots = ("src", "lib") if dart_pkg else ("src",)
 
     def comp(f):
         p = f.relative_to(repo).parts
         if len(p) == 1:
             return "(root)"
-        if p[0] == "src":  # src layout: its packages are the components (src/api/x.py -> api); a loose Python module is its own,
+        if p[0] in pkg_roots:  # src layout (lib/ for Dart): its packages are the components (src/api/x.py -> api); a loose Python module is its own,
             if len(p) == 2 and (p[1] in ("__init__.py", "__main__.py") or not p[1].endswith(".py")):  # other loose files (App.tsx, main.tsx) join main
                 return "main"
             return p[1].removesuffix(".py")
         return p[0]
+
+    def dart_target(f, spec):
+        """The component a Dart import points to: a relative path or package:<this app>/…; dart: and other packages are None."""
+        if spec.startswith(f"package:{dart_pkg}/"):
+            dest = repo / "lib" / spec.split("/", 1)[1]
+        elif ":" not in spec:
+            dest = (f.parent / spec).resolve()
+        else:
+            return None
+        try:
+            return comp(dest)
+        except ValueError:
+            return None
 
     def js_target(f, spec):
         """The component a JS/TS import points to, or None for a package (react) or a path outside the repo."""
@@ -132,7 +155,7 @@ def flat_structure(repo):
         n["py_lines"] += (text[f].count("\n") + 1) if f.suffix in PROG_EXT else 0  # program lines (Python or JS/TS), the rest is infrastructure
         n["paths"].append(rel(f))
     names = {c for c in nodes if c != "(root)"}
-    dirs = {c for c in names if (repo / c).is_dir() and c != "src"}  # path mentions only make sense for real top-level folders, not words like "api"
+    dirs = {c for c in names if (repo / c).is_dir() and c not in pkg_roots}  # path mentions only make sense for real top-level folders, not words like "api"
     edges = {}  # (source, target) -> edge; one edge per ordered pair, the strongest kind wins (import > mention > shared)
 
     def add(a, b, kind, evidence):
@@ -143,6 +166,12 @@ def flat_structure(repo):
         if f.suffix in JS_EXT:
             for spec in JS_IMPORT.findall(text[f]):
                 t = js_target(f, spec)
+                if t in names and t != comp(f):
+                    add(comp(f), t, "import", [f"{rel(f)} imports {spec}"])
+            continue
+        if f.suffix == ".dart":
+            for spec in DART_IMPORT.findall(text[f]):
+                t = dart_target(f, spec)
                 if t in names and t != comp(f):
                     add(comp(f), t, "import", [f"{rel(f)} imports {spec}"])
             continue
@@ -168,6 +197,10 @@ def flat_structure(repo):
         hits = sorted(n for n in root_files if comp(f) != "(root)" and n in text[f])
         if hits and (comp(f), "(root)") not in edges:
             add(comp(f), "(root)", "mention", [f"{rel(f)} names {', '.join(hits[:3])}"])
+    app = "main" if "main" in nodes else "(root)"  # a Flutter runner builds and hosts the Dart app
+    for f in files if dart_pkg else []:
+        if comp(f) in PLATFORMS and comp(f) != app and re.search(r"(?i)\bflutter", text[f]) and (comp(f), app) not in edges:
+            add(comp(f), app, "mention", [f"{rel(f)} builds the Flutter app ({dart_pkg})"])
     users = defaultdict(set)  # 3. identifiers shared by few components
     for f in files:
         for tok in set(ENVVAR.findall(text[f])) | {p for p in CFGPATH.findall(text[f]) if not p.startswith(SYSPATH)}:
