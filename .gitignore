@@ -14,3 +14,5 @@ blueprint-proto/descriptions.js
 blueprint-proto/detail.json
 # packaged app builds and the downloaded runtimes
 dist/
+node_modules/
+*.excalidraw.prev

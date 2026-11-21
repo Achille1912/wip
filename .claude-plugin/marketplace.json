@@ -1,0 +1,6 @@
+{
+  "name": "excalidraw-schema",
+  "owner": { "name": "achille" },
+  "description": "Excalidraw schema of a project, for Claude Code.",
+  "plugins": [{ "name": "excalidraw-schema", "source": "./schema-excalidraw", "description": "A conceptual Excalidraw schema of your project, drawn and edited by Claude from the chat." }]
+}
